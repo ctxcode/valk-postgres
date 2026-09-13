@@ -11,6 +11,7 @@ class Statement {
 extend Connection {
     column_names: Array[String] (.{})
     column_types: Array[uint] (.{})
+    column_formats: Array[u8] (.{}) // Per column: FORMAT_TEXT or FORMAT_BINARY
     column_count: uint (0)
     /// Rows affected by the last completed command (`INSERT`, `UPDATE`, `DELETE`, ...).
     /// For a `SELECT` it is the row count, known once every row has been fetched.
@@ -29,8 +30,9 @@ extend Connection {
     /// Runs a query. Rows, if any, are read with `fetch_row`, `fetch_one` or `fetch_all`.
     ///
     /// Values in `binds` are bound to `:name` placeholders. Values bound earlier with `bind`
-    /// and `bindv` are used as well. A query without bound values is sent as is and may
-    /// contain several statements separated by `;`.
+    /// and `bindv` are used as well. A single statement is prepared and cached, so that
+    /// running it again is cheaper. A query may also contain several statements separated
+    /// by `;`; it is then sent as is and cannot have bound values.
     + fn query(q: String, binds: ?Map[?Value] (null)) !Error {
         if this.closed : throw .closed { message: "The connection is closed" }
         if this.in_progress : this.stop_query()
@@ -39,6 +41,9 @@ extend Connection {
         this.affected_rows = 0
         this.command_tag = ""
         this.column_count = 0
+        this.column_names.clear()
+        this.column_types.clear()
+        this.column_formats.clear()
         this.final_binds.clear()
 
         if isset(binds) {
@@ -58,7 +63,7 @@ extend Connection {
         }
 
         if this.debug : println("Run: " + q)
-        if this.final_binds.length > 0 {
+        if this.final_binds.length > 0 || is_single_statement(q) {
             this.send_extended(q) !>
         } else {
             this.send_simple(q) !>
@@ -86,6 +91,7 @@ extend Connection {
         this.final_binds.clear()
         this.column_names.clear()
         this.column_types.clear()
+        this.column_formats.clear()
         this.column_count = 0
     }
 
@@ -156,7 +162,19 @@ extend Connection {
         each binds as bind {
             this.write_param(s, bind)
         }
-        s.write_u16_be(0) // Result format codes: all text
+        // Result format codes: binary where the column type is known and decodable
+        let formats = this.column_formats
+        formats.clear()
+        if cached {
+            s.write_u16_be(this.column_count.to(u16))
+            each this.column_types as type {
+                let format: u8 = this.binary_capable(type) ? FORMAT_BINARY : FORMAT_TEXT
+                formats.append(format)
+                s.write_u16_be(format.to(u16))
+            }
+        } else {
+            s.write_u16_be(0) // All text
+        }
         this.write_message('B')
         // Execute the unnamed portal, all rows
         s.write_byte(0)
@@ -286,6 +304,10 @@ extend Connection {
             types.append(type_oid)
         }
         this.column_count = count
+        let formats = this.column_formats
+        formats.clear()
+        i = 0
+        while i++ < count : formats.append(0) // Text
     }
 
     fn read_command_complete() {
@@ -353,12 +375,14 @@ extend Connection {
         let r = this.reader
         let names = this.column_names
         let types = this.column_types
+        let formats = this.column_formats
         let count: uint = r.read_u16_be()
         if count != this.column_count : throw .protocol { message: "The server sent a row with an unexpected number of columns" }
         let i: uint = 0
         while i < count {
             let name = names.get(i) ! throw .protocol { message: "Bug: Missing column name" }
             let type = types.get(i) ! throw .protocol { message: "Bug: Missing column type" }
+            let binary = (formats.get(i) !? FORMAT_TEXT) == FORMAT_BINARY
             i++
             let len = r.read_u32_be()
             if len == u32.$max {
@@ -367,7 +391,7 @@ extend Connection {
             }
             let field = r.remaining().view(0, len)
             r.skip(len)
-            row.set(name, convert_field(field, type))
+            row.set(name, decode_field(field, type, binary))
         }
     }
 }

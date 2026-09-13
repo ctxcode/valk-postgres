@@ -43,6 +43,7 @@ async fn main() {
         .unwrap();
 
     let by_id = client.prepare("SELECT id, name, score FROM bench_users WHERE id = $1").await.unwrap();
+    let fetch_all = client.prepare("SELECT id, name, score, created FROM bench_users WHERE id > $1").await.unwrap();
 
     // Warmup
     for i in 0..200i32 {
@@ -73,7 +74,7 @@ async fn main() {
     let start = Instant::now();
     let mut fetched = 0usize;
     for _ in 0..FETCH_ROUNDS {
-        let rows = client.query("SELECT id, name, score, created FROM bench_users", &[]).await.unwrap();
+        let rows = client.query(&fetch_all, &[&0i32]).await.unwrap();
         for row in &rows {
             let id: i32 = row.get(0);
             let name: &str = row.get(1);

@@ -84,7 +84,7 @@ func main() {
 	start = time.Now()
 	fetched := 0
 	for i := 0; i < fetchRounds; i++ {
-		rs, err := conn.Query(ctx, "SELECT id, name, score, created FROM bench_users")
+		rs, err := conn.Query(ctx, "SELECT id, name, score, created FROM bench_users WHERE id > $1", 0)
 		must(err)
 		for rs.Next() {
 			must(rs.Scan(&id, &name, &score, &created))

@@ -1,0 +1,131 @@
+use postgres
+
+fn same_rows(a: Array[Map[postgres.Value]], b: Array[Map[postgres.Value]]) bool {
+    if a.length != b.length {
+        println("row count differs: " + a.length + " != " + b.length)
+        return false
+    }
+    let same = true
+    each a as row, i {
+        let other = b.get(i) ! return false
+        each row as v, k {
+            let ov = other.get(k) ! return false
+            if v.type != ov.type {
+                println("row " + i + " type differs for " + k + ": " + v.to_string() + " / " + ov.to_string())
+                same = false
+            } else if v.to_string() != ov.to_string() {
+                println("row " + i + " " + k + ": '" + v.to_string() + "' != '" + ov.to_string() + "'")
+                same = false
+            }
+        }
+    }
+    return same
+}
+
+test "Binary result format" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    con.query("SET TimeZone = 'UTC'; SET DateStyle = 'ISO, MDY'") ! { println(E.message) assert(false) return }
+    con.query("DROP TABLE IF EXISTS bin_t; CREATE TABLE bin_t (id serial PRIMARY KEY, i2 smallint, i4 int, i8 bigint, f4 real, f8 float8, b bool, d date, ts timestamp, tz timestamptz, t text, n numeric, o oid)") ! { println(E.message) assert(false) return }
+    con.query("INSERT INTO bin_t (i2, i4, i8, f4, f8, b, d, ts, tz, t, n, o) VALUES
+        (32767, 2147483647, 9223372036854775807, 1.5, -2.25, true, '2024-02-29', '2024-02-29 13:45:00.5', '2024-02-29 13:45:00.123456+00', 'x', 1.10, 42),
+        (-32768, -2147483648, -9223372036854775807 - 1, -0.5, 1e300, false, '0001-01-01 BC', '1999-12-31 23:59:59.999999', '1969-07-20 20:17:40+00', NULL, NULL, 0),
+        (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+        (0, 0, 0, 0, 0, true, 'infinity', 'infinity', '-infinity', '', 0, 1),
+        (1, -1, 1, 0.1, 0.1, true, '2000-01-01', '2000-01-01 00:00:00', '2000-01-01 00:00:00+00', 'y', -1, 2),
+        (2, 2, -2, 0, 0, false, '1999-12-31', '1999-12-31 00:00:00.000001', '1999-12-31 23:59:59+00', 'z', 2, 3),
+        (3, 3, 3, 0, 0, false, '0999-06-15', '0044-03-15 BC', '0001-01-01 00:00:00+00', '', 3, 4)
+    ") ! { println(E.message) assert(false) return }
+    assert(con.affected_rows == 7)
+
+    // First run: text. Second run: the cached statement asks for binary values
+    let q = "SELECT * FROM bin_t WHERE id > :id ORDER BY id"
+    con.query(q, .{ "id" => 0 }) ! { println(E.message) assert(false) return }
+    let text_rows = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(text_rows.length == 7)
+    con.query(q, .{ "id" => 0 }) ! { println(E.message) assert(false) return }
+    assert(con.col_binary(1))
+    assert(con.col_binary(9)) // tz
+    assert(!con.col_binary(4)) // real
+    assert(!con.col_binary(10)) // text
+    assert(!con.col_binary(11)) // numeric
+    let binary_rows = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(same_rows(text_rows, binary_rows))
+    let first = binary_rows.get(0) ! { assert(false) return }
+    assert((first["i8"] ?? 0).to_int() == 9223372036854775807)
+    assert((first["tz"] ?? "").to_string() == "2024-02-29 13:45:00.123456+00")
+    assert((first["ts"] ?? "").to_string() == "2024-02-29 13:45:00.5")
+    assert((first["f8"] ?? 0.0).to_float() == -2.25)
+    let second = binary_rows.get(1) ! { assert(false) return }
+    assert((second["d"] ?? "").to_string() == "0001-01-01 BC")
+    assert((second["i8"] ?? 0).to_int() == -9223372036854775807 - 1)
+    assert((second["i4"] ?? 0).to_int() == -2147483648)
+    assert((second["i2"] ?? 0).to_int() == -32768)
+    assert((second["f4"] ?? 0.0).to_float() == -0.5)
+    assert(!(second["b"] ?? true).to_bool())
+    let fourth = binary_rows.get(3) ! { assert(false) return }
+    assert((fourth["d"] ?? "").to_string() == "infinity")
+    assert((fourth["tz"] ?? "").to_string() == "-infinity")
+
+    // Fast api on binary values
+    con.query(q, .{ "id" => 0 }) ! { println(E.message) assert(false) return }
+    let i = 0
+    while con.next_row() ! { assert(false) return } {
+        let expected = text_rows.get(i) ! { assert(false) return }
+        i++
+        let c: uint = 0
+        while c < con.col_count() {
+            let name = con.col_name(c)
+            let ev = expected[name] ?? postgres.Value.null()
+            assert(con.col_is_null(c) == ev.is_null())
+            assert(con.col_value(c).to_string() == ev.to_string())
+            assert(con.col_value(c).type == ev.type)
+            if !ev.is_null() {
+                assert(con.col_int(c) == ev.to_int() || ev.type == postgres.TYPE.string)
+                assert(con.col_bool(c) == ev.to_bool() || ev.type == postgres.TYPE.string)
+                if ev.type != postgres.TYPE.float : assert(con.col_string(c) == ev.to_string() || ev.type == postgres.TYPE.bool)
+            }
+            c++
+        }
+        if i == 1 {
+            assert(con.col_view(2).length == 4)
+            assert(con.col_view(3).length == 8)
+            assert(con.col_string(6) == "t")
+            assert(con.col_float(5) == -2.25)
+            assert(con.col_float(4) == 1.5)
+            assert(con.col_int(3) == 9223372036854775807)
+        }
+    }
+    assert(i == 7)
+
+    // Another time zone: timestamptz falls back to text, the rest stays binary
+    con.query("SET TimeZone = 'Europe/Amsterdam'") ! { println(E.message) assert(false) return }
+    con.query("SELECT * FROM bin_t ORDER BY id") ! { println(E.message) assert(false) return }
+    let ams_rows = con.fetch_all() ! { println(E.message) assert(false) return }
+    con.query(q, .{ "id" => 0 }) ! { println(E.message) assert(false) return }
+    assert(con.col_binary(1))
+    assert(con.col_binary(7))
+    assert(!con.col_binary(9))
+    let ams_binary = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(same_rows(ams_rows, ams_binary))
+    let ams_first = ams_binary.get(0) ! { assert(false) return }
+    assert((ams_first["tz"] ?? "").to_string() == "2024-02-29 14:45:00.123456+01")
+
+    // Another date style: dates and timestamps fall back to text
+    con.query("SET DateStyle = 'SQL, DMY'") ! { println(E.message) assert(false) return }
+    con.query("SELECT * FROM bin_t ORDER BY id") ! { println(E.message) assert(false) return }
+    let sql_rows = con.fetch_all() ! { println(E.message) assert(false) return }
+    con.query(q, .{ "id" => 0 }) ! { println(E.message) assert(false) return }
+    assert(con.col_binary(1))
+    assert(!con.col_binary(7))
+    assert(!con.col_binary(8))
+    let sql_binary = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(same_rows(sql_rows, sql_binary))
+    let sql_first = sql_binary.get(0) ! { assert(false) return }
+    assert((sql_first["d"] ?? "").to_string() == "29/02/2024")
+}

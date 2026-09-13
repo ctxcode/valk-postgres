@@ -52,8 +52,14 @@ extend Connection {
     + fn col_is_null(index: uint) bool {
         return (this.col_lengths.get(index) !? uint.$max) == uint.$max
     }
-    /// Returns the text of column `index` as a view into the receive buffer, empty for NULL.
-    /// The view is valid until the next row is read.
+    /// Returns whether column `index` arrived in binary format. Queries with bound values
+    /// that are executed again receive integers, floats, bools, dates and timestamps in
+    /// binary form; `col_view` then holds those bytes instead of text.
+    + fn col_binary(index: uint) bool {
+        return (this.column_formats.get(index) !? FORMAT_TEXT) == FORMAT_BINARY
+    }
+    /// Returns the bytes of column `index` as a view into the receive buffer, empty for NULL.
+    /// The view is valid until the next row is read. See `col_binary`.
     + fn col_view(index: uint) &[u8] {
         let len = this.col_lengths.get(index) !? uint.$max
         if len == uint.$max : return this.reader.source.view(0, 0)
@@ -61,27 +67,33 @@ extend Connection {
     }
     /// Returns column `index` as a new string, "" for NULL.
     + fn col_string(index: uint) String {
+        if this.col_binary(index) && !this.col_is_null(index) : return binary_string(this.col_view(index), this.col_type(index))
         return this.col_view(index).to_string()
     }
     /// Returns column `index` as an integer, 0 for NULL or text that is not a number.
     + fn col_int(index: uint) int {
-        return this.col_view(index).to_int() !? 0
+        if this.col_binary(index) : return binary_int(this.col_view(index), this.col_type(index))
+        let v = this.col_view(index)
+        return v.to_int() ! return (v.to_float() !? 0).to(int)
     }
     /// Returns column `index` as a float, 0 for NULL or text that is not a number.
     + fn col_float(index: uint) float {
+        if this.col_binary(index) : return binary_float(this.col_view(index), this.col_type(index))
         return this.col_view(index).to_float() !? 0
     }
-    /// Returns column `index` as a bool: true for `t`, `true`, `1`, `yes` and `on`.
+    /// Returns column `index` as a bool: true for `t`, `true`, `yes`, `on` and numbers other than 0.
     + fn col_bool(index: uint) bool {
+        if this.col_binary(index) : return binary_bool(this.col_view(index), this.col_type(index))
         let v = this.col_view(index)
         if v.length == 0 : return false
         let c = v[0]
-        return c == 't' || c == 'T' || c == '1' || c == 'y' || c == 'Y' || c == 'o' && v.length == 2
+        if c.is_number() || c == '-' : return (v.to_float() !? 0) != 0
+        return c == 't' || c == 'T' || c == 'y' || c == 'Y' || c == 'o' && v.length == 2
     }
     /// Returns column `index` as a `Value`, typed by the column type like `fetch_row` does.
     + fn col_value(index: uint) Value {
         if this.col_is_null(index) : return Value.null()
-        return convert_field(this.col_view(index), this.col_type(index))
+        return decode_field(this.col_view(index), this.col_type(index), this.col_binary(index))
     }
 }
 

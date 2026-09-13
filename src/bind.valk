@@ -48,14 +48,10 @@ extend Connection {
                 continue
             }
             if ch == '$' {
-                // Dollar quoted text: $$...$$ or $tag$...$tag$
-                let end = i
-                while end < len && (query[end].is_alpha_numeric() || query[end] == '_') : end++
-                if end < len && query[end] == '$' && (end == i || !query[i].is_number()) {
-                    let tag = query.range(i - 1, end - i + 2)
-                    let close = query.index_of(tag, end + 1) ! throw .error { message: "Unterminated dollar quoted text in query" }
-                    r.write(query.view(i - 1, close + tag.length - (i - 1)))
-                    i = close + tag.length
+                let end = dollar_quote_end(query, i - 1)
+                if end > 0 {
+                    r.write(query.view(i - 1, end - (i - 1)))
+                    i = end
                     continue
                 }
                 r.write_byte(ch)
@@ -164,4 +160,63 @@ extend Connection {
         s.write(scratch)
         scratch.clear()
     }
+}
+
+// For a '$' at `start`: the index after the closing tag of a dollar quoted text
+// ($$...$$ or $tag$...$tag$), the query length when it is not closed, or 0 when the '$'
+// does not start a dollar quote
+fn dollar_quote_end(query: String, start: uint) uint {
+    let len = query.length
+    let i = start + 1
+    let end = i
+    while end < len && (query[end].is_alpha_numeric() || query[end] == '_') : end++
+    if end >= len || query[end] != '$' : return 0
+    if end > i && query[i].is_number() : return 0
+    let tag = query.range(start, end - start + 1)
+    let close = query.index_of(tag, end + 1) ! return len
+    return close + tag.length
+}
+
+// Whether the query holds exactly one statement (so that it can be prepared). Text in
+// quotes, dollar quotes and comments is skipped; a trailing ';' is allowed.
+fn is_single_statement(query: String) bool {
+    let len = query.length
+    let has_content = false
+    let i: uint = 0
+    while i < len {
+        let ch = query[i++]
+        if ch == '\'' || ch == '"' {
+            has_content = true
+            while i < len {
+                if query[i++] == ch : break
+            }
+            continue
+        }
+        if ch == '$' {
+            let end = dollar_quote_end(query, i - 1)
+            if end > 0 {
+                has_content = true
+                i = end
+                continue
+            }
+        }
+        if ch == '-' && i < len && query[i] == '-' {
+            while i < len && query[i] != '\n' : i++
+            continue
+        }
+        if ch == '/' && i < len && query[i] == '*' {
+            let close = query.index_of("*/", i + 1) !? len
+            i = close + 2
+            continue
+        }
+        if ch == ';' {
+            // Only whitespace may follow
+            while i < len {
+                if !query[i++].is_whitespace() : return false
+            }
+            return has_content
+        }
+        if !ch.is_whitespace() : has_content = true
+    }
+    return has_content
 }

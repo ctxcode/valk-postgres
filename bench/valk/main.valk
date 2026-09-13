@@ -58,7 +58,8 @@ fn main(args: Array[String]) {
     let fetched : uint = 0
     i = 0
     while i++ < FETCH_ROUNDS {
-        db.query("SELECT id, name, score, created FROM bench_users") !!
+        db.bind("id", 0)
+        db.query("SELECT id, name, score, created FROM bench_users WHERE id > :id") !!
         while db.fetch_row(row) !! {
             checksum += (row["id"] ?? 0).to_int().to(uint) + (row["name"] ?? "").to_string().length
             fetched++
@@ -71,13 +72,14 @@ fn main(args: Array[String]) {
     fetched = 0
     i = 0
     while i++ < FETCH_ROUNDS {
-        db.query("SELECT id, name, score, created FROM bench_users") !!
+        db.bind("id", 0)
+        db.query("SELECT id, name, score, created FROM bench_users WHERE id > :id") !!
         while db.next_row() !! {
             checksum += db.col_int(0).to(uint) + db.col_string(1).length + db.col_int(2).to(uint) + db.col_view(3).length
             fetched++
         }
     }
-    report("fetch_rows_fast", fetched, start)
+    report("fetch_rows_fast_api", fetched, start)
 
     // 4. Inserts inside one transaction
     start = time.mono_us()

@@ -1,0 +1,193 @@
+// Binary result format. Prepared statements that are executed again (so their column types
+// are known) ask for binary values where this file can turn them back into exactly the
+// text the server would have sent: integers, float8, bools and, with an ISO DateStyle,
+// dates and timestamps (timestamptz only in the UTC time zone).
+
+value PG_EPOCH_DAYS (10957) // 2000-01-01 counted from 1970-01-01
+value USEC_PER_DAY (86400000000)
+value DATE_INFINITY (2147483647)
+value DATE_NEG_INFINITY (-2147483648)
+
+extend Connection {
+
+    // Whether a column of this type is requested in binary format
+    fn binary_capable(type: uint) bool {
+        if type == OID_INT2 || type == OID_INT4 || type == OID_INT8 || type == OID_OID : return true
+        if type == OID_FLOAT8 || type == OID_BOOL : return true
+        // float4 stays text: its binary value widened to a float differs from the parsed text
+        if type == OID_DATE || type == OID_TIMESTAMP : return this.iso_datestyle()
+        if type == OID_TIMESTAMPTZ : return this.iso_datestyle() && this.utc_timezone()
+        return false
+    }
+
+    fn iso_datestyle() bool {
+        return (this.parameters.get("DateStyle") !? "").starts_with("ISO")
+    }
+
+    fn utc_timezone() bool {
+        let tz = this.parameters.get("TimeZone") !? ""
+        return tz == "UTC" || tz == "Etc/UTC" || tz == "GMT" || tz == "Etc/GMT" || tz == "UCT" || tz == "Etc/UCT" || tz == "Zulu" || tz == "Etc/Zulu" || tz == "Universal" || tz == "Etc/Universal" || tz == "GMT0" || tz == "Etc/GMT0"
+    }
+}
+
+// Converts a column into a Value: text fields by column type, binary fields by decoding
+fn decode_field(field: &[u8], type: uint, binary: bool) Value {
+    if !binary : return convert_field(field, type)
+    if type == OID_INT2 || type == OID_INT4 || type == OID_INT8 || type == OID_OID : return binary_int(field, type)
+    if type == OID_FLOAT4 || type == OID_FLOAT8 : return binary_float(field, type)
+    if type == OID_BOOL : return binary_bool(field, type)
+    return binary_string(field, type)
+}
+
+// Big-endian unsigned integer from the first `bytes` bytes (0 when the field is too short)
+fn be_uint(field: &[u8], bytes: uint) uint {
+    if field.length < bytes : return 0
+    let v: uint = 0
+    let i: uint = 0
+    while i < bytes {
+        v = (v << 8) | field[i].to(uint)
+        i++
+    }
+    return v
+}
+
+fn i64_from_bits(v: uint) int {
+    if v > (u64.$max >> 1) : return -((u64.$max - v).to(int)) - 1
+    return v.to(int)
+}
+fn f32_from_bits(bits: u32) f32 {
+    return @ptrv(&bits, f32)
+}
+fn f64_from_bits(bits: u64) f64 {
+    return @ptrv(&bits, f64)
+}
+
+fn binary_int(field: &[u8], type: uint) int {
+    if type == OID_INT4 {
+        let v = be_uint(field, 4).to(int)
+        return v >= 2147483648 ? v - 4294967296 : v
+    }
+    if type == OID_INT8 : return i64_from_bits(be_uint(field, 8))
+    if type == OID_INT2 {
+        let v = be_uint(field, 2).to(int)
+        return v >= 32768 ? v - 65536 : v
+    }
+    if type == OID_OID : return be_uint(field, 4).to(int)
+    if type == OID_BOOL : return field.length > 0 && field[0] == 1 ? 1 : 0
+    if type == OID_FLOAT4 || type == OID_FLOAT8 : return binary_float(field, type).to(int)
+    if type == OID_DATE {
+        let v = be_uint(field, 4).to(int)
+        return v >= 2147483648 ? v - 4294967296 : v
+    }
+    if type == OID_TIMESTAMP || type == OID_TIMESTAMPTZ : return i64_from_bits(be_uint(field, 8))
+    return 0
+}
+
+fn binary_float(field: &[u8], type: uint) float {
+    if type == OID_FLOAT4 : return f32_from_bits(be_uint(field, 4).to(u32)).to(float)
+    if type == OID_FLOAT8 : return f64_from_bits(be_uint(field, 8).to(u64)).to(float)
+    return binary_int(field, type)
+}
+
+fn binary_bool(field: &[u8], type: uint) bool {
+    if type == OID_BOOL : return field.length > 0 && field[0] == 1
+    if type == OID_FLOAT4 || type == OID_FLOAT8 : return binary_float(field, type) != 0
+    return binary_int(field, type) != 0
+}
+
+// The text the server would have sent for the field
+fn binary_string(field: &[u8], type: uint) String {
+    if type == OID_BOOL : return binary_bool(field, type) ? "t" : "f"
+    if type == OID_FLOAT4 || type == OID_FLOAT8 : return binary_float(field, type).to_shortest_string()
+    if type == OID_DATE : return format_date(binary_int(field, type))
+    if type == OID_TIMESTAMP : return format_timestamp(binary_int(field, type), false)
+    if type == OID_TIMESTAMPTZ : return format_timestamp(binary_int(field, type), true)
+    return binary_int(field, type).to(String)
+}
+
+// Days since 2000-01-01 as "YYYY-MM-DD" (ISO DateStyle)
+fn format_date(days: int) String {
+    if days == DATE_INFINITY : return "infinity"
+    if days == DATE_NEG_INFINITY : return "-infinity"
+    let out = ByteBuffer.new(16)
+    if write_date(out, days) : out.write(" BC")
+    return out.to_string()
+}
+
+// Microseconds since 2000-01-01 00:00:00 as "YYYY-MM-DD HH:MM:SS[.ffffff][+00]"
+fn format_timestamp(usec: int, with_tz: bool) String {
+    if usec == int.$max : return "infinity"
+    if usec == int.$min : return "-infinity"
+    let days = usec / USEC_PER_DAY
+    let rem = usec - days * USEC_PER_DAY
+    if rem < 0 {
+        rem += USEC_PER_DAY
+        days--
+    }
+    let out = ByteBuffer.new(32)
+    let bc = write_date(out, days)
+    out.write_byte(' ')
+    let secs = rem / 1000000
+    let fsec = rem - secs * 1000000
+    write_2(out, secs / 3600)
+    out.write_byte(':')
+    write_2(out, (secs / 60) % 60)
+    out.write_byte(':')
+    write_2(out, secs % 60)
+    if fsec > 0 {
+        // Fractional seconds without trailing zeros
+        out.write_byte('.')
+        let width = 6
+        while fsec % 10 == 0 {
+            fsec /= 10
+            width--
+        }
+        write_padded(out, fsec, width)
+    }
+    if with_tz : out.write("+00")
+    if bc : out.write(" BC")
+    return out.to_string()
+}
+
+// Writes the civil date of days since 2000-01-01 (proleptic Gregorian); returns whether
+// the year is BC, which the caller writes after the time
+fn write_date(out: ByteBuffer, days: int) bool {
+    let z = days + PG_EPOCH_DAYS + 719468
+    let era = (z >= 0 ? z : z - 146096) / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = mp < 10 ? mp + 3 : mp - 9
+    if m <= 2 : y++
+    let bc = y <= 0
+    if bc : y = 1 - y
+    write_padded(out, y, 4)
+    out.write_byte('-')
+    write_2(out, m)
+    out.write_byte('-')
+    write_2(out, d)
+    return bc
+}
+
+fn write_2(out: ByteBuffer, v: int) {
+    if v < 10 : out.write_byte('0')
+    out.write_int_ascii(v)
+}
+
+// Writes a non-negative number with leading zeros up to `width` digits
+fn write_padded(out: ByteBuffer, v: int, width: int) {
+    let digits = 1
+    let rest = v / 10
+    while rest > 0 {
+        digits++
+        rest /= 10
+    }
+    while digits < width {
+        out.write_byte('0')
+        digits++
+    }
+    out.write_int_ascii(v)
+}
