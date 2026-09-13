@@ -1,0 +1,18 @@
+/// Thrown by every operation of this package.
+///
+/// - `connect`: the TCP connection or the startup handshake failed.
+/// - `ssl`: SSL was required but could not be established.
+/// - `auth`: the server rejected the credentials.
+/// - `unsupported`: the server asked for something this package does not implement.
+/// - `protocol`: the server sent bytes this package did not expect.
+/// - `error`: the server reported an error for a query. `sqlstate` holds the SQLSTATE
+///   (for example `42P01` for an unknown table), `message`, `detail` and `hint` the
+///   text the server sent.
+/// - `closed`: the connection is closed.
++ error Error (connect, ssl, auth, unsupported, protocol, error, closed) payload {
+    message: String
+    sqlstate: String("")
+    severity: String("")
+    detail: String("")
+    hint: String("")
+}

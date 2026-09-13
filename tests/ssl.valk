@@ -1,0 +1,44 @@
+use postgres
+
+fn ssl_fails(port: u32, mode: postgres.SslMode) bool {
+    let con = connect(port, mode) ! {
+        return error_is(E.code, ssl)
+    }
+    con.close()
+    return false
+}
+
+test "SSL" {
+    // The md5 server has no SSL configured
+    let plain = connect(5433, postgres.SslMode.disable) ! { println(E.message) assert(false) return }
+    assert(!plain.ssl_enabled())
+    plain.close()
+    let preferred = connect(5433, postgres.SslMode.prefer) ! { println(E.message) assert(false) return }
+    assert(!preferred.ssl_enabled())
+    preferred.close()
+    assert(ssl_fails(5433, postgres.SslMode.require))
+    assert(ssl_fails(5433, postgres.SslMode.verify_full))
+
+    // The SSL server has a self-signed certificate
+    let secure = connect(5434, postgres.SslMode.require) ! { println("SSL: " + E.message) assert(false) return }
+    defer secure.close()
+    assert(secure.ssl_enabled())
+    secure.query("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()") ! { println(E.message) assert(false) return }
+    let row = secure.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["ssl"] ?? false).to_bool())
+    // Larger transfers over SSL
+    secure.query("SELECT repeat('x', 200000) AS t") ! { println(E.message) assert(false) return }
+    row = secure.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["t"] ?? "").to_string().length == 200000)
+    secure.query("SELECT :v::int AS v", .{ "v" => 3 }) ! { println(E.message) assert(false) return }
+    row = secure.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["v"] ?? 0).to_int() == 3)
+
+    let preferred_ssl = connect(5434, postgres.SslMode.prefer) ! { println(E.message) assert(false) return }
+    assert(preferred_ssl.ssl_enabled())
+    preferred_ssl.close()
+    assert(ssl_fails(5434, postgres.SslMode.verify_full))
+}

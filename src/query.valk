@@ -1,0 +1,384 @@
+use valk.time
+
+class Statement {
+    name: String
+    last_used: uint
+    param_count: uint
+    column_names: Array[String]
+    column_types: Array[uint]
+}
+
+extend Connection {
+    column_names: Array[String] (.{})
+    column_types: Array[uint] (.{})
+    column_count: uint (0)
+    /// Rows affected by the last completed command (`INSERT`, `UPDATE`, `DELETE`, ...).
+    /// For a `SELECT` it is the row count, known once every row has been fetched.
+    ~ affected_rows: uint (0)
+    /// Command tag of the last completed command, such as `INSERT 0 1`.
+    ~ command_tag: String ("")
+    fetching: bool (false)
+    in_progress: bool (false)
+    statements: Map[Statement] (.{})
+    statement_counter: uint (0)
+    scratch_row: Map[Value] (.{})
+    /// Number of prepared statements kept per connection. Queries with bound values are
+    /// prepared once and reused while they stay in the cache.
+    + statement_cache_size: uint (64)
+
+    /// Runs a query. Rows, if any, are read with `fetch_row`, `fetch_one` or `fetch_all`.
+    ///
+    /// Values in `binds` are bound to `:name` placeholders. Values bound earlier with `bind`
+    /// and `bindv` are used as well. A query without bound values is sent as is and may
+    /// contain several statements separated by `;`.
+    + fn query(q: String, binds: ?Map[?Value] (null)) !Error {
+        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.in_progress : this.stop_query()
+        //
+        this.in_progress = true
+        this.affected_rows = 0
+        this.command_tag = ""
+        this.column_count = 0
+        this.final_binds.clear()
+
+        if isset(binds) {
+            each binds as value, name {
+                this.bind(name, value)
+            }
+        }
+
+        // Replace placeholders
+        if (this.binds.length + this.named_binds.length) > 0 {
+            q = this.replace_params(q) ! {
+                this.clear_binds()
+                this.reset_query_state()
+                throw E
+            }
+            this.clear_binds()
+        }
+
+        if this.debug : println("Run: " + q)
+        if this.final_binds.length > 0 {
+            this.send_extended(q) !>
+        } else {
+            this.send_simple(q) !>
+            this.fetching = true
+            this.next_result() !>
+        }
+    }
+
+    /// Runs `BEGIN`.
+    + fn begin() !Error {
+        this.query("BEGIN") !>
+    }
+    /// Runs `COMMIT`.
+    + fn commit() !Error {
+        this.query("COMMIT") !>
+    }
+    /// Runs `ROLLBACK`.
+    + fn rollback() !Error {
+        this.query("ROLLBACK") !>
+    }
+
+    fn reset_query_state() {
+        this.in_progress = false
+        this.fetching = false
+        this.final_binds.clear()
+        this.column_names.clear()
+        this.column_types.clear()
+        this.column_count = 0
+    }
+
+    // Discards the rows of the current query, so that a new query can be sent
+    fn stop_query() {
+        if this.fetching : this.flush_result() _
+        this.reset_query_state()
+    }
+
+    fn flush_result() !Error {
+        let row = this.scratch_row
+        while this.fetching {
+            this.fetch_row(row) !>
+        }
+        row.clear()
+    }
+
+    fn send_simple(q: String) !Error {
+        let s = this.sender
+        s.write(q)
+        s.write_byte(0)
+        this.write_message('Q')
+        this.send() !>
+    }
+
+    // Parse / Describe (once per query text) + Bind / Execute / Sync, all in one round trip
+    fn send_extended(q: String) !Error {
+        let s = this.sender
+        let now = time.mono_us()
+        let name = ""
+        let cached = false
+        let closing: uint = 0
+
+        let existing: ?Statement = this.statements.get(q) !? null
+        if isset(existing) {
+            name = existing.name
+            existing.last_used = now
+            this.column_names.clear()
+            this.column_types.clear()
+            this.column_names.append_many(existing.column_names)
+            this.column_types.append_many(existing.column_types)
+            this.column_count = existing.column_names.length
+            cached = true
+        } else {
+            closing = this.evict_statements(now)
+            this.statement_counter++
+            name = "s" + this.statement_counter
+            // Parse: the parameter types are left to the server to infer
+            s.write(name)
+            s.write_byte(0)
+            s.write(q)
+            s.write_byte(0)
+            s.write_u16_be(0)
+            this.write_message('P')
+            // Describe statement
+            s.write_byte('S')
+            s.write(name)
+            s.write_byte(0)
+            this.write_message('D')
+        }
+        // Bind to the unnamed portal
+        let binds = this.final_binds
+        s.write_byte(0)
+        s.write(name)
+        s.write_byte(0)
+        s.write_u16_be(0) // Parameter format codes: all text
+        s.write_u16_be(binds.length.to(u16))
+        each binds as bind {
+            this.write_param(s, bind)
+        }
+        s.write_u16_be(0) // Result format codes: all text
+        this.write_message('B')
+        // Execute the unnamed portal, all rows
+        s.write_byte(0)
+        s.write_u32_be(0)
+        this.write_message('E')
+        // Sync
+        this.write_message('S')
+        this.send() !>
+
+        // Responses
+        while closing > 0 {
+            this.recv() !>
+            this.check_error() !>
+            if this.msg_type != '3' : this.unexpected() !>
+            closing--
+        }
+        if !cached {
+            // ParseComplete
+            this.recv() !>
+            this.check_error() !>
+            if this.msg_type != '1' : this.unexpected() !>
+            // ParameterDescription
+            this.recv() !>
+            this.check_error() !>
+            if this.msg_type != 't' : this.unexpected() !>
+            let param_count: uint = this.reader.read_u16_be()
+            // RowDescription or NoData
+            this.recv() !>
+            this.check_error() !>
+            if this.msg_type == 'T' : this.read_row_description()
+            else if this.msg_type != 'n' : this.unexpected() !>
+            //
+            this.statements.set(q, Statement {
+                name: name
+                last_used: now
+                param_count: param_count
+                column_names: this.column_names.clone()
+                column_types: this.column_types.clone()
+            })
+        }
+        // BindComplete
+        this.recv() !>
+        this.check_error() !>
+        if this.msg_type != '2' : this.unexpected() !>
+        this.fetching = true
+        // A command without rows: read its completion right away, so affected_rows is known
+        if this.column_count == 0 : this.flush_result() !>
+    }
+
+    // Queues Close messages for statements that fell out of the cache; returns how many
+    fn evict_statements(now: uint) uint {
+        let ss = this.statements
+        if ss.length < this.statement_cache_size : return 0
+        let s = this.sender
+        let closed: uint = 0
+        // Statements not used for a while
+        let old = now - (3 * 1000 * 1000)
+        let remove = Array[String]{}
+        each ss as stmt, key {
+            if stmt.last_used < old : remove.append(key)
+        }
+        // Otherwise the least recently used one
+        if remove.length == 0 {
+            let oldest = uint.$max
+            let oldest_key = ""
+            each ss as stmt, key {
+                if stmt.last_used < oldest {
+                    oldest = stmt.last_used
+                    oldest_key = key
+                }
+            }
+            if oldest_key != "" : remove.append(oldest_key)
+        }
+        each remove as key {
+            let stmt = ss.get(key) ! continue
+            ss.remove(key)
+            s.write_byte('S')
+            s.write(stmt.name)
+            s.write_byte(0)
+            this.write_message('C')
+            closed++
+        }
+        return closed
+    }
+
+    // Reads messages until a result set starts (true) or the query is complete (false)
+    fn next_result() bool !Error {
+        while true {
+            this.recv() !>
+            this.check_error() !>
+            let t = this.msg_type
+            if t == 'T' {
+                this.read_row_description()
+                return true
+            }
+            if t == 'C' {
+                this.read_command_complete()
+                continue
+            }
+            if t == 'I' : continue // Empty query
+            if t == 'Z' {
+                this.read_ready()
+                return false
+            }
+            if t == 'D' : throw .protocol { message: "The server sent a row without a row description" }
+            this.unexpected() !>
+        }
+    }
+
+    fn read_row_description() {
+        let r = this.reader
+        let names = this.column_names
+        let types = this.column_types
+        names.clear()
+        types.clear()
+        let count: uint = r.read_u16_be()
+        let i: uint = 0
+        while i++ < count {
+            let name = r.read_cstring()
+            r.skip(4) // Table oid
+            r.skip(2) // Column attribute number
+            let type_oid: uint = r.read_u32_be()
+            r.skip(2) // Type size
+            r.skip(4) // Type modifier
+            r.skip(2) // Format code
+            names.append(name)
+            types.append(type_oid)
+        }
+        this.column_count = count
+    }
+
+    fn read_command_complete() {
+        let tag = this.reader.read_cstring()
+        this.command_tag = tag
+        // The row count is the last word of the tag: "INSERT 0 1", "UPDATE 3", "SELECT 5"
+        let parts = tag.split(" ")
+        let last = parts.get(parts.length - 1) !? ""
+        this.affected_rows = last.to_uint() !? 0
+    }
+
+    /// Fetches every remaining row.
+    + fn fetch_all() Array[Map[Value]] !Error {
+        let result = Array[Map[Value]]{}
+        let row: Map[Value] = .{}
+        while this.fetch_row(row) !> {
+            result.append(row.clone())
+        }
+        return result
+    }
+
+    /// Fetches the next row and discards the rest. Returns null when there is no row.
+    + fn fetch_one() ?Map[Value] !Error {
+        let row: Map[Value] = .{}
+        if !(this.fetch_row(row) !>) : return null
+        this.flush_result() !>
+        return row
+    }
+
+    /// Reads the next row into `row` (cleared first), keyed by column name. Returns false
+    /// when there are no more rows. A query with several statements continues into the
+    /// rows of the next statement.
+    + fn fetch_row(row: Map[Value]) bool !Error {
+        row.clear()
+        if !this.fetching : return false
+
+        this.recv() !>
+        this.check_error() !>
+
+        let t = this.msg_type
+        if t == 'D' {
+            this.read_data_row(row) !>
+            return true
+        }
+        if t == 'C' || t == 'I' {
+            if t == 'C' : this.read_command_complete()
+            // More results (a query with several statements)?
+            if this.next_result() !> : return this.fetch_row(row) !>
+            return false
+        }
+        if t == 'Z' {
+            this.read_ready()
+            return false
+        }
+        this.unexpected() !>
+    }
+
+    fn read_data_row(row: Map[Value]) !Error {
+        let r = this.reader
+        let names = this.column_names
+        let types = this.column_types
+        let count: uint = r.read_u16_be()
+        if count != this.column_count : throw .protocol { message: "The server sent a row with an unexpected number of columns" }
+        let i: uint = 0
+        while i < count {
+            let name = names.get(i) ! throw .protocol { message: "Bug: Missing column name" }
+            let type = types.get(i) ! throw .protocol { message: "Bug: Missing column type" }
+            i++
+            let len = r.read_u32_be()
+            if len == u32.$max {
+                row.set(name, Value.null())
+                continue
+            }
+            let field = r.remaining().view(0, len)
+            r.skip(len)
+            if type == OID_INT2 || type == OID_INT4 || type == OID_INT8 || type == OID_OID {
+                let v = field.to_int() ! {
+                    row.set(name, field.to_string())
+                    continue
+                }
+                row.set(name, v)
+            } else if type == OID_FLOAT4 || type == OID_FLOAT8 {
+                let v = field.to_float() ! {
+                    row.set(name, field.to_string())
+                    continue
+                }
+                row.set(name, v)
+            } else if type == OID_BOOL {
+                let v: bool = field.length > 0 && field[0] == 't'
+                row.set(name, v)
+            } else {
+                row.set(name, field.to_string())
+            }
+        }
+    }
+}

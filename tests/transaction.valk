@@ -1,0 +1,49 @@
+test "Transactions" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    con.query("DROP TABLE IF EXISTS trans_t; CREATE TABLE trans_t (id serial PRIMARY KEY, name text)") ! { println(E.message) assert(false) return }
+    assert(!con.in_transaction())
+    assert(con.transaction_status == 'I')
+
+    // Rollback
+    con.begin() ! { println(E.message) assert(false) return }
+    assert(con.in_transaction())
+    assert(con.transaction_status == 'T')
+    con.query("INSERT INTO trans_t (name) VALUES (:n)", .{ "n" => "a" }) ! { println(E.message) assert(false) return }
+    con.rollback() ! { println(E.message) assert(false) return }
+    assert(!con.in_transaction())
+    con.query("SELECT count(*) AS c FROM trans_t") ! { println(E.message) assert(false) return }
+    let row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["c"] ?? 0).to_int() == 0)
+
+    // Commit
+    con.begin() ! { println(E.message) assert(false) return }
+    con.query("INSERT INTO trans_t (name) VALUES (:n)", .{ "n" => "b" }) ! { println(E.message) assert(false) return }
+    con.commit() ! { println(E.message) assert(false) return }
+    assert(!con.in_transaction())
+    con.query("SELECT count(*) AS c FROM trans_t") ! { println(E.message) assert(false) return }
+    row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["c"] ?? 0).to_int() == 1)
+
+    // A rollback of the transaction is visible from another connection
+    let other = connect() ! { println(E.message) assert(false) return }
+    defer other.close()
+    con.begin() ! { println(E.message) assert(false) return }
+    con.query("INSERT INTO trans_t (name) VALUES ('c')") ! { println(E.message) assert(false) return }
+    other.query("SELECT count(*) AS c FROM trans_t") ! { println(E.message) assert(false) return }
+    row = other.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["c"] ?? 0).to_int() == 1)
+    con.commit() ! { println(E.message) assert(false) return }
+    other.query("SELECT count(*) AS c FROM trans_t") ! { println(E.message) assert(false) return }
+    row = other.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["c"] ?? 0).to_int() == 2)
+}

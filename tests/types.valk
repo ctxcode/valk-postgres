@@ -1,0 +1,110 @@
+use postgres
+
+test "Column types" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    con.query("DROP TABLE IF EXISTS types_test") ! { println(E.message) assert(false) return }
+    con.query("CREATE TABLE types_test (
+        id serial PRIMARY KEY, i2 smallint, i4 integer, i8 bigint, f4 real, f8 double precision,
+        num numeric(12,3), b boolean, t text, v varchar(20), c char(3), d date, ts timestamp,
+        tz timestamptz, j json, jb jsonb, u uuid, by bytea, arr int[], neg bigint
+    )") ! { println(E.message) assert(false) return }
+
+    con.query("INSERT INTO types_test (i2, i4, i8, f4, f8, num, b, t, v, c, d, ts, tz, j, jb, u, by, arr, neg)
+        VALUES (:i2, :i4, :i8, :f4, :f8, :num, :b, :t, :v, :c, :d, :ts, :tz, :j, :jb, :u, :by, :arr, :neg)", .{
+        "i2" => 32767, "i4" => 2147483647, "i8" => 1234567890123, "f4" => 0.5, "f8" => 3.25,
+        "num" => "12345.678", "b" => true, "t" => "hello", "v" => "world", "c" => "ab", "d" => "2024-02-29",
+        "ts" => "2024-02-29 13:45:00", "tz" => "2024-02-29 13:45:00+00", "j" => "{\"a\": 1}", "jb" => "{\"b\": [1, 2]}",
+        "u" => "123e4567-e89b-12d3-a456-426614174000", "by" => "\\x48656c6c6f", "arr" => "{1,2,3}", "neg" => -5
+    }) ! { println(E.message) assert(false) return }
+    assert(con.affected_rows == 1)
+
+    con.query("SET TimeZone = 'UTC'") ! { println(E.message) assert(false) return }
+    assert((con.parameters.get("TimeZone") !? "") == "UTC")
+
+    con.query("SELECT * FROM types_test WHERE id = 1") ! { println(E.message) assert(false) return }
+    let nrow = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(nrow))
+    if !isset(nrow) : return
+    let row = nrow
+    assert(row.length == 20)
+    assert((row["i2"] ?? 0).type == postgres.TYPE.int)
+    assert((row["i2"] ?? 0).to_int() == 32767)
+    assert((row["i4"] ?? 0).to_int() == 2147483647)
+    assert((row["i8"] ?? 0).to_int() == 1234567890123)
+    assert((row["neg"] ?? 0).to_int() == -5)
+    assert((row["f4"] ?? 0).type == postgres.TYPE.float)
+    assert((row["f4"] ?? 0).to_float() == 0.5)
+    assert((row["f8"] ?? 0).to_float() == 3.25)
+    assert((row["num"] ?? 0).type == postgres.TYPE.string)
+    assert((row["num"] ?? 0).to_string() == "12345.678")
+    assert((row["num"] ?? 0).to_float() == 12345.678)
+    assert((row["num"] ?? 0).to_int() == 12345)
+    assert((row["b"] ?? false).type == postgres.TYPE.bool)
+    assert((row["b"] ?? false).to_bool())
+    assert((row["b"] ?? false).to_string() == "true")
+    assert((row["t"] ?? "").to_string() == "hello")
+    assert((row["v"] ?? "").to_string() == "world")
+    assert((row["c"] ?? "").to_string() == "ab ")
+    assert((row["d"] ?? "").to_string() == "2024-02-29")
+    assert((row["ts"] ?? "").to_string() == "2024-02-29 13:45:00")
+    assert((row["tz"] ?? "").to_string() == "2024-02-29 13:45:00+00")
+    assert((row["j"] ?? "").to_string() == "{\"a\": 1}")
+    assert(((row["j"] ?? "").to_json().get_int("a") !? 0) == 1)
+    assert(((row["jb"] ?? "").to_json().get_array("b") ! panic("Not an array")).length == 2)
+    assert((row["u"] ?? "").to_string() == "123e4567-e89b-12d3-a456-426614174000")
+    assert((row["by"] ?? "").to_string() == "\\x48656c6c6f")
+    assert((row["by"] ?? "").to_bytes() == "Hello")
+    assert((row["arr"] ?? "").to_string() == "{1,2,3}")
+
+    // Nulls
+    con.query("INSERT INTO types_test (i4) VALUES (NULL)") ! { println(E.message) assert(false) return }
+    con.query("SELECT i4, t, b, f8 FROM types_test WHERE id = 2") ! { println(E.message) assert(false) return }
+    let nulls = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(nulls))
+    if isset(nulls) {
+        assert(nulls.length == 4)
+        assert((nulls["i4"] ?? 0).is_null())
+        assert(!isset((nulls["i4"] ?? 0).to_int_or_null()))
+        assert((nulls["t"] ?? "").is_null())
+        assert(!isset((nulls["t"] ?? "").to_string_or_null()))
+        assert((nulls["b"] ?? false).is_null())
+        assert(!isset((nulls["b"] ?? false).to_bool_or_null()))
+        assert(!isset((nulls["f8"] ?? 0.0).to_float_or_null()))
+        assert((nulls["t"] ?? "").to_string() == "")
+    }
+
+    // Special floats
+    con.query("SELECT 'NaN'::float8 AS n, 'Infinity'::float8 AS i, 1e300::float8 AS big, -0.001::float8 AS small") ! { println(E.message) assert(false) return }
+    let floats = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(floats))
+    if isset(floats) {
+        assert((floats["big"] ?? 0.0).to_float() == 1e300)
+        assert((floats["small"] ?? 0.0).to_float() == -0.001)
+        // NaN and infinity have no float parse: they stay text
+        assert((floats["n"] ?? "").to_string() == "NaN" || (floats["n"] ?? 0.0).to_float().is_nan())
+    }
+
+    // Large text
+    let big = String.random(100000)
+    con.query("SELECT :t AS t, length(:t) AS l", .{ "t" => big }) ! { println(E.message) assert(false) return }
+    let bigrow = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(bigrow))
+    if isset(bigrow) {
+        assert((bigrow["t"] ?? "").to_string() == big)
+        assert((bigrow["l"] ?? 0).to_int() == 100000)
+    }
+
+    // Many rows
+    con.query("SELECT n, n * 2 AS d FROM generate_series(1, 5000) AS n") ! { println(E.message) assert(false) return }
+    let rows = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(rows.length == 5000)
+    assert(con.affected_rows == 5000)
+    let last = rows.get(4999) ! { assert(false) return }
+    assert((last["d"] ?? 0).to_int() == 10000)
+}

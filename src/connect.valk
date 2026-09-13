@@ -1,0 +1,312 @@
+use valk.net
+use valk.time
+
+/// Opens a connection and logs in.
+///
+/// `db` is the database to connect to, or null for the database named after the user.
+/// `ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`).
+/// Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA-256.
++ fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error {
+    let sock = net.tcp_client(host, port.to(u16)) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
+
+    let con = Connection {
+        con: sock
+        host: host
+        username: user
+        password: password
+        db: db
+        ssl_mode: ssl
+        reader: ByteReader.new("")
+    }
+    // A query may legitimately run for a long time; connecting had its own timeout
+    sock.set_timeouts(0, 0)
+
+    con.init() ! {
+        con.close()
+        throw E
+    }
+    con.password = "" // clear from memory
+
+    return con
+}
+
+/// A notification received through `LISTEN`.
++ class Notification {
+    + process_id: u32
+    + channel: String
+    + payload: String
+}
+
++ class Connection {
+    con: net.TcpConnection
+    //
+    host: String
+    username: String
+    password: String
+    db: ?String
+    ssl_mode: SslMode
+    // Data in
+    data_in: ByteBuffer (.new())
+    packet_end: uint (0) // End of the message `reader` currently views inside data_in (compacted on next recv)
+    reader: ByteReader
+    msg_type: u8 (0) // Type byte of the message `reader` currently views
+    // Data out
+    packetbuf: ByteBuffer (.new())             // Framed messages waiting for send()
+    sender: ByteBuffer (.new())                // Payload of the message being built
+    querybuf: ByteBuffer (.new())              // Scratch for rewriting queries / encoding parameters
+    recv_scratch: mut &[u8] ([u8]{ 0 x 8192 }) // Reused socket read buffer
+    // Server info
+    /// Runtime parameters reported by the server, such as `server_version` and `TimeZone`.
+    ~ parameters: Map[String] (.{})
+    /// Process id of the server backend serving this connection.
+    ~ process_id: u32 (0)
+    secret_key: u32 (0)
+    /// Transaction status of the last ReadyForQuery: 'I' idle, 'T' in a transaction, 'E' in a failed transaction.
+    ~ transaction_status: u8 ('I')
+    /// Notifications received through `LISTEN`, oldest first. Remove what you have handled.
+    ~ notifications: Array[Notification] (.{})
+    /// Message of the last notice (`NOTICE`, `WARNING`, ...) the server sent.
+    ~ last_notice: String ("")
+    //
+    ssl_active: bool (false)
+    + debug: bool (false)
+    + debug_bytes: bool (false)
+    ~ closed: bool (false)
+
+    fn init() !Error {
+        if this.ssl_mode != SslMode.disable : this.enable_ssl() !>
+        this.send_startup() !>
+        this.authenticate() !>
+        // Collect the parameter status and key data messages until ReadyForQuery
+        let count = 0
+        while true {
+            if count++ > 1000 : throw .protocol { message: "The server keeps sending startup messages" }
+            this.recv() !>
+            this.check_error(false) !>
+            let t = this.msg_type
+            if t == 'Z' {
+                this.read_ready()
+                return
+            }
+            if t == 'K' {
+                let r = this.reader
+                this.process_id = r.read_u32_be()
+                this.secret_key = r.read_u32_be()
+                continue
+            }
+            this.unexpected() !>
+        }
+    }
+
+    fn unexpected() !Error $throw {
+        throw .protocol { message: "Unexpected message from the server: '" + this.msg_type.to_ascii_string() + "'" }
+    }
+
+    /// Returns the version string reported by the server (for example `16.4`).
+    + fn server_version() String {
+        return this.parameters.get("server_version") !? ""
+    }
+
+    /// Returns whether the connection is encrypted with SSL.
+    + fn ssl_enabled() bool {
+        return this.ssl_active
+    }
+
+    /// Returns whether a transaction is open (`BEGIN` was sent and not yet committed or rolled back).
+    + fn in_transaction() bool {
+        return this.transaction_status != TRANS_IDLE
+    }
+
+    /// Sets the socket read and write timeouts in milliseconds; 0 waits forever (the default).
+    + fn set_timeouts(read_timeout_ms: uint, write_timeout_ms: uint) {
+        this.con.set_timeouts(read_timeout_ms, write_timeout_ms)
+    }
+
+    // Parses an ErrorResponse ('E') and throws it. Does nothing for other messages.
+    //
+    // After a query error the server discards everything up to the next Sync and then
+    // sends ReadyForQuery; `wait_ready` reads up to that point so the connection can be
+    // used again. During startup the server closes the connection instead.
+    fn check_error(wait_ready: bool (true)) !Error {
+        if this.msg_type != 'E' : return
+        let r = this.reader
+        let severity = ""
+        let code = ""
+        let message = ""
+        let detail = ""
+        let hint = ""
+        while true {
+            let field = r.read_byte()
+            if field == 0 : break
+            let value = r.read_cstring()
+            if field == 'S' : severity = value
+            else if field == 'C' : code = value
+            else if field == 'M' : message = value
+            else if field == 'D' : detail = value
+            else if field == 'H' : hint = value
+        }
+        if this.debug : println("ERROR %{code}: %{message}")
+
+        if !wait_ready {
+            if code.starts_with("28") : throw .auth { message: message, sqlstate: code, severity: severity, detail: detail, hint: hint }
+            throw .connect { message: message, sqlstate: code, severity: severity, detail: detail, hint: hint }
+        }
+
+        this.reset_query_state()
+        // When the connection dies while waiting, the original error is the useful one
+        this.wait_ready() _
+
+        throw .error { message: message, sqlstate: code, severity: severity, detail: detail, hint: hint }
+    }
+
+    // Reads and discards messages until ReadyForQuery
+    fn wait_ready() !Error {
+        while true {
+            this.recv() !>
+            if this.msg_type == 'Z' {
+                this.read_ready()
+                return
+            }
+        }
+    }
+
+    fn read_ready() {
+        this.transaction_status = this.reader.read_byte()
+        this.in_progress = false
+        this.fetching = false
+    }
+
+    // Reads the next message into `reader`. Asynchronous messages (notices, notifications,
+    // parameter changes) are handled here and never returned.
+    fn recv() !Error {
+        let start: uint = 0
+        if this.debug : start = time.mono_us()
+
+        let buf = this.data_in
+        let r = this.reader
+        while true {
+            // Drop the previous message now that nothing reads from it anymore
+            if this.packet_end > 0 {
+                buf.clear_until(this.packet_end)
+                this.packet_end = 0
+            }
+            let recv_bytes: uint = buf.length
+            while recv_bytes < 5 {
+                recv_bytes += this.recv_into_buffer() !>
+            }
+            // Message header: 1 byte type + 4 byte big-endian length (the length includes itself)
+            r.reset()
+            r.source = buf
+            let type = r.read_byte()
+            let len: uint = r.read_u32_be()
+            if len < 4 : throw .protocol { message: "Invalid message length received from the server" }
+            let payload_len = len - 4
+            while recv_bytes < (payload_len + 5) {
+                recv_bytes += this.recv_into_buffer() !>
+            }
+            // Point the reader at the payload in place; the copy-free view stays valid until the next recv()
+            r.reset()
+            r.source = buf.view(5, payload_len)
+            this.packet_end = payload_len + 5
+            this.msg_type = type
+
+            if this.debug {
+                println("RECV '" + type.to_ascii_string() + "' (" + payload_len + " bytes)")
+                if this.debug_bytes : print_bytes(r.source)
+                println("Time needed to read: " + ((time.mono_us() - start) / 1000) + "ms")
+                println("------")
+            }
+
+            // Asynchronous messages
+            if type == 'N' {
+                this.read_notice()
+                continue
+            }
+            if type == 'S' {
+                let name = r.read_cstring()
+                let value = r.read_cstring()
+                this.parameters.set(name, value)
+                continue
+            }
+            if type == 'A' {
+                let pid = r.read_u32_be()
+                let channel = r.read_cstring()
+                let payload = r.read_cstring()
+                this.notifications.append(Notification { process_id: pid, channel: channel, payload: payload })
+                continue
+            }
+            return
+        }
+    }
+
+    fn read_notice() {
+        let r = this.reader
+        while true {
+            let field = r.read_byte()
+            if field == 0 : break
+            let value = r.read_cstring()
+            if field == 'M' : this.last_notice = value
+        }
+    }
+
+    fn recv_into_buffer() uint !Error {
+        let data = this.recv_scratch
+        let count = this.con.read(data) ! {
+            if error_is(E.code, closed) : throw .closed { message: "The server closed the connection" }
+            throw .error { message: "Failed to read bytes from the socket" }
+        }
+        this.data_in.write(data.view(0, count))
+        return count
+    }
+
+    // Frames the payload built in `sender` as a message of `type` and queues it in `packetbuf`
+    fn write_message(type: u8) {
+        let s = this.sender
+        let pb = this.packetbuf
+        pb.write_byte(type)
+        pb.write_u32_be((s.length + 4).to(u32))
+        pb.write(s)
+        s.clear()
+        if this.debug : println("QUEUE '" + type.to_ascii_string() + "'")
+    }
+
+    // Same as write_message, for the startup messages that carry no type byte
+    fn write_message_untyped() {
+        let s = this.sender
+        let pb = this.packetbuf
+        pb.write_u32_be((s.length + 4).to(u32))
+        pb.write(s)
+        s.clear()
+    }
+
+    // Sends every queued message
+    fn send() !Error {
+        let pb = this.packetbuf
+        let start: uint = 0
+        if this.debug {
+            start = time.mono_us()
+            println("SEND " + pb.length + " bytes")
+            if this.debug_bytes : print_bytes(pb)
+        }
+        this.con.write(pb) ! {
+            pb.clear()
+            if error_is(E.code, closed) : throw .closed { message: "The connection is closed" }
+            throw .error { message: "Failed to send bytes to the server" }
+        }
+        pb.clear()
+        if this.debug {
+            println("Time needed to send: " + ((time.mono_us() - start) / 1000) + "ms")
+            println("------")
+        }
+    }
+
+    /// Closes the connection. Further calls throw `closed`.
+    + fn close() {
+        if this.closed : return
+        this.closed = true
+        // Terminate
+        this.write_message('X')
+        this.send() _
+        this.con.close() _
+    }
+}

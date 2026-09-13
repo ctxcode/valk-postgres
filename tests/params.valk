@@ -1,0 +1,142 @@
+use postgres
+
+fn one(con: postgres.Connection, key: String) postgres.Value {
+    let row = con.fetch_one() ! {
+        println(E.message)
+        return postgres.Value.null()
+    }
+    if !isset(row) : return postgres.Value.null()
+    return row[key] ?? postgres.Value.null()
+}
+
+test "Placeholders" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    // Positional ? placeholders, casts and text that looks like placeholders
+    con.bindv(7)
+    con.query("SELECT ?::int AS a, 'x:notparam' AS b, '::' AS c, \"a?b\" FROM (SELECT 1 AS \"a?b\") AS t") ! { println(E.message) assert(false) return }
+    let row = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(row))
+    if isset(row) {
+        assert((row["a"] ?? 0).to_int() == 7)
+        assert((row["b"] ?? "").to_string() == "x:notparam")
+        assert((row["c"] ?? "").to_string() == "::")
+        assert((row["a?b"] ?? 0).to_int() == 1)
+    }
+
+    // Explicit $1 with a positional value
+    con.bindv("hello")
+    con.query("SELECT $1::text AS v") ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_string() == "hello")
+
+    // Named with cast
+    con.query("SELECT :v::int + 1 AS v", .{ "v" => 41 }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_int() == 42)
+
+    // The same name twice
+    con.query("SELECT :v::int + :v::int AS v", .{ "v" => 2 }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_int() == 4)
+
+    // The jsonb ? operator is kept when no positional values are bound
+    con.query("SELECT '{\"a\":1}'::jsonb ? :key AS has", .{ "key" => "a" }) ! { println(E.message) assert(false) return }
+    assert(one(con, "has").to_bool())
+    con.query("SELECT '{\"a\":1}'::jsonb ? :key AS has", .{ "key" => "b" }) ! { println(E.message) assert(false) return }
+    assert(!one(con, "has").to_bool())
+
+    // Missing named binding
+    let failed = false
+    con.query("SELECT :nope::int", .{ "other" => 1 }) ! {
+        failed = true
+        assert(error_is(E.code, error))
+        assert(E.message.contains("nope"))
+    }
+    assert(failed)
+
+    // Too many ? tokens
+    failed = false
+    con.bindv(1)
+    con.query("SELECT ?::int, ?::int") ! {
+        failed = true
+        assert(E.message.contains("'?'"))
+    }
+    assert(failed)
+
+    // Dollar quoted text and comments are untouched
+    con.query("SELECT $$:name$$ AS v, :name::int AS n", .{ "name" => 1 }) ! { println(E.message) assert(false) return }
+    row = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(row))
+    if isset(row) {
+        assert((row["v"] ?? "").to_string() == ":name")
+        assert((row["n"] ?? 0).to_int() == 1)
+    }
+    con.query("SELECT $tag$ :a $tag$ AS v", .{ "a" => 1 }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_string() == " :a ")
+    con.query("SELECT :a::int AS v -- :b\n /* :c */", .{ "a" => 5 }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_int() == 5)
+
+    // Types of bound values
+    con.query("SELECT :b::bool AS v", .{ "b" => true }) ! { println(E.message) assert(false) return }
+    assert(one(con, "b").is_null())
+    con.query("SELECT :b::bool AS v", .{ "b" => true }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_bool())
+    con.query("SELECT :b::bool AS v", .{ "b" => false }) ! { println(E.message) assert(false) return }
+    assert(!one(con, "v").to_bool())
+    con.query("SELECT :f::float8 * 2 AS v", .{ "f" => 1.25 }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_float() == 2.5)
+    con.query("SELECT :n::int8 AS v", .{ "n" => -1234567890123 }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_int() == -1234567890123)
+    con.query("SELECT :s AS v", .{ "s" => "it's \"quoted\" \\ text" }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_string() == "it's \"quoted\" \\ text")
+    con.query("SELECT length(:s) AS v", .{ "s" => "héllo" }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_int() == 5)
+
+    // A positional array is sent as a Postgres array
+    con.bindv(Array[int]{ 1, 2, 3 })
+    con.query("SELECT 2 = ANY($1::int[]) AS v") ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_bool())
+    con.bindv(Array[String]{ "a b", "c,d" })
+    con.query("SELECT array_length($1::text[], 1) AS v, ($1::text[])[2] AS w") ! { println(E.message) assert(false) return }
+    row = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(row))
+    if isset(row) {
+        assert((row["v"] ?? 0).to_int() == 2)
+        assert((row["w"] ?? "").to_string() == "c,d")
+    }
+
+    // Many parameters
+    con.query("SELECT :a::int + :b::int + :c::int + :d::int + :e::int + :f::int + :g::int + :h::int + :i::int + :j::int AS v", .{
+        "a" => 1, "b" => 2, "c" => 3, "d" => 4, "e" => 5, "f" => 6, "g" => 7, "h" => 8, "i" => 9, "j" => 10
+    }) ! { println(E.message) assert(false) return }
+    assert(one(con, "v").to_int() == 55)
+}
+
+test "Statement cache eviction" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    con.statement_cache_size = 4
+    let i = 0
+    while i < 20 {
+        con.query("SELECT :v::int + " + i + " AS v", .{ "v" => i }) ! { println(E.message) assert(false) return }
+        assert(one(con, "v").to_int() == i * 2)
+        i++
+    }
+    // Reuse of the newest ones
+    i = 18
+    while i < 20 {
+        con.query("SELECT :v::int + " + i + " AS v", .{ "v" => i }) ! { println(E.message) assert(false) return }
+        assert(one(con, "v").to_int() == i * 2)
+        i++
+    }
+    // Only the statements of this connection exist on the server
+    con.query("SELECT count(*) AS c FROM pg_prepared_statements") ! { println(E.message) assert(false) return }
+    assert(one(con, "c").to_int() <= 4)
+}

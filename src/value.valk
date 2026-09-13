@@ -1,0 +1,253 @@
+use valk.json
+use valk.crypto
+
++ enum TYPE {
+    null
+    int
+    float
+    string
+    bool
+    array
+}
+
+/// A value read from a result row or bound to a query.
+///
+/// Integer columns become `int`, `float4`/`float8` columns `float`, `bool` columns `bool`
+/// and every other column type (text, numeric, timestamps, json, uuid, bytea, ...) keeps
+/// the text the server sent as `string`. The `to_*` methods convert between them.
++ class Value {
+    + type: TYPE
+    int_value: int (0)
+    float_value: float (0)
+    string_value: String ("")
+    bool_value: bool (false)
+    + array_items: ?Array[Value]
+
+    + fn is_null() bool {
+        return this.type == TYPE.null
+    }
+
+    + fn to_bool() bool $auto {
+        let type = this.type
+        if type == TYPE.bool : return this.bool_value
+        if type == TYPE.int : return this.int_value != 0
+        if type == TYPE.float : return this.float_value != 0
+        if type == TYPE.string {
+            let s = this.string_value
+            return s == "t" || s == "true" || s == "1" || s == "yes" || s == "on"
+        }
+        return false
+    }
+
+    + fn to_string() String $auto {
+        let type = this.type
+        if type == TYPE.string : return this.string_value
+        if type == TYPE.int : return this.int_value.to(String)
+        if type == TYPE.float : return this.float_value.to_shortest_string()
+        if type == TYPE.bool : return this.bool_value ? "true" : "false"
+        if type == TYPE.array {
+            let items = this.array_items
+            if !isset(items) : return "{}"
+            let out = ByteBuffer.new()
+            write_array_literal(out, items)
+            return out.to_string()
+        }
+        return this.string_value
+    }
+
+    + fn to_int() int $auto {
+        let type = this.type
+        if type == TYPE.int : return this.int_value
+        if type == TYPE.string : return this.string_value.to_int() !? (this.string_value.to_float() !? 0).to(int)
+        if type == TYPE.float : return this.float_value.to(int)
+        if type == TYPE.bool : return this.bool_value ? 1 : 0
+        return this.int_value
+    }
+
+    + fn to_float() float $auto {
+        let type = this.type
+        if type == TYPE.float : return this.float_value
+        if type == TYPE.int : return this.int_value
+        if type == TYPE.string : return this.string_value.to_float() !? 0
+        if type == TYPE.bool : return this.bool_value ? 1 : 0
+        return this.float_value
+    }
+
+    /// Parses a `json`/`jsonb` column. Returns json null when the text is not valid JSON.
+    + fn to_json() json.Value $auto {
+        let type = this.type
+        if type == TYPE.string : return json.decode(this.string_value) !? json.new_null()
+        if type == TYPE.float : return json.new_float(this.float_value)
+        if type == TYPE.int : return json.new_int(this.int_value)
+        if type == TYPE.bool : return json.new_bool(this.bool_value)
+        return json.new_null()
+    }
+
+    /// Returns the raw bytes of a `bytea` column (the server sends them hex encoded as `\x...`).
+    ///
+    /// Any other value is returned as its string form.
+    + fn to_bytes() String {
+        let s = this.to_string()
+        if s.starts_with("\\x") : return crypto.hex_decode(s.range(2, s.length - 2)) !? s
+        return s
+    }
+
+    + static fn null() Value {
+        return Value {
+            type: TYPE.null
+        }
+    }
+
+    + fn to_bool_or_null() ?bool $auto {
+        if this.type == TYPE.null : return null
+        return this.to_bool()
+    }
+    + fn to_string_or_null() ?String $auto {
+        if this.type == TYPE.null : return null
+        return this.to_string()
+    }
+    + fn to_int_or_null() ?int $auto {
+        if this.type == TYPE.null : return null
+        return this.to_int()
+    }
+    + fn to_float_or_null() ?float $auto {
+        if this.type == TYPE.null : return null
+        return this.to_float()
+    }
+    + fn to_json_or_null() ?json.Value $auto {
+        if this.type == TYPE.null : return null
+        return this.to_json()
+    }
+}
+
+// Writes `items` as a Postgres array literal: {1,"a b",NULL}
+fn write_array_literal(out: ByteBuffer, items: Array[Value]) {
+    out.write_byte('{')
+    each items as item, i {
+        if i > 0 : out.write_byte(',')
+        if item.type == TYPE.null {
+            out.write("NULL")
+            continue
+        }
+        if item.type == TYPE.array {
+            let sub = item.array_items
+            if isset(sub) : write_array_literal(out, sub)
+            else : out.write("{}")
+            continue
+        }
+        if item.type != TYPE.string {
+            out.write(item.to_string())
+            continue
+        }
+        // Quote strings so commas, braces, spaces and quotes stay intact
+        out.write_byte('"')
+        each item.string_value as ch {
+            if ch == '"' || ch == '\\' : out.write_byte('\\')
+            out.write_byte(ch)
+        }
+        out.write_byte('"')
+    }
+    out.write_byte('}')
+}
+
+extend bool {
+    + fn to_pg_value() Value $auto {
+        return Value {
+            type: TYPE.bool
+            bool_value: this
+        }
+    }
+}
+extend int {
+    + fn to_pg_value() Value $auto {
+        return Value {
+            type: TYPE.int
+            int_value: this
+        }
+    }
+}
+extend uint {
+    + fn to_pg_value() Value $auto {
+        return Value {
+            type: TYPE.int
+            int_value: this
+        }
+    }
+}
+extend String {
+    + fn to_pg_value() Value $auto {
+        return Value {
+            type: TYPE.string
+            string_value: this
+        }
+    }
+}
+extend float {
+    + fn to_pg_value() Value $auto {
+        return Value {
+            type: TYPE.float
+            float_value: this
+        }
+    }
+}
+extend json.Value {
+    + fn to_pg_value() Value $auto {
+        return Value {
+            type: TYPE.string
+            string_value: this.encode()
+        }
+    }
+}
+
+extend Array[T] {
+    + fn to_pg_value() Value $auto {
+        #if T.$can_convert_to(Value)
+        if this.length == 0 : return Value { type: TYPE.array }
+        let items = Array[Value].new(this.length)
+        each this as v {
+            items.append(convert(v))
+        }
+        return Value {
+            type: TYPE.array
+            array_items: items
+        }
+        #else
+        return Value.null()
+        #end
+    }
+}
+
+/// Converts any supported value (integers, floats, bools, strings, json values, arrays of
+/// those, and nullable versions) into a `Value`.
++ fn convert(ndata: $T) Value {
+    #if T.$is_nullable
+    if !isset(ndata) : return Value { type: TYPE.null }
+    #end
+
+    let data = ndata
+
+    #if T.$is_type_of(Value)
+    return data
+    #elif T.$can_convert_to(Value)
+    return data.to(Value)
+    #elif T.$has_method(to_pg_value)
+    return data.to_pg_value()
+    #elif T.$is_bool
+    return Value {
+        type: TYPE.bool
+        bool_value: data
+    }
+    #elif T.$is_integer
+    return Value {
+        type: TYPE.int
+        int_value: data.to(int)
+    }
+    #elif T.$is_float
+    return Value {
+        type: TYPE.float
+        float_value: data.to(float)
+    }
+    #else
+    #error "Cannot convert value to a postgres Value"
+    #end
+}

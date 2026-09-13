@@ -1,0 +1,25 @@
+use valk.net
+
+extend Connection {
+    fn enable_ssl() !Error {
+        // SSLRequest
+        let s = this.sender
+        s.write_u32_be(SSL_REQUEST_CODE)
+        this.write_message_untyped()
+        this.send() !>
+        // The server answers with a single byte: 'S' (proceed) or 'N' (no SSL)
+        let buf = this.recv_scratch.view(0, 1)
+        this.con.read(buf) ! throw .connect { message: "Failed to read the SSL response from the server" }
+        let answer = buf[0]
+        if answer == 'N' {
+            if this.ssl_mode == SslMode.require || this.ssl_mode == SslMode.verify_full : throw .ssl { message: "The server does not support SSL" }
+            return
+        }
+        if answer != 'S' : throw .protocol { message: "Invalid SSL response from the server" }
+
+        let ssl = net.Ssl.new()
+        ssl.set_verify(this.ssl_mode == SslMode.verify_full)
+        this.con.ssl_connect(ssl) ! throw .ssl { message: "Failed to establish SSL connection: " + ssl.get_error_message() }
+        this.ssl_active = true
+    }
+}

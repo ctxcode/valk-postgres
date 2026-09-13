@@ -1,0 +1,9 @@
+{
+    "name": "postgres",
+    "use": "0.7.0",
+    "require": {
+        "valk": {
+            "min": "0.7.0"
+        }
+    }
+}

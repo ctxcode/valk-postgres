@@ -1,0 +1,25 @@
+use postgres
+
+fn main() {
+    let db = postgres.connect("127.0.0.1", "test", "root", "valk_postgres_tests", 5432) ! panic("Failed to connect: %{E.message}")
+    defer db.close()
+    println("Connected to PostgreSQL " + db.server_version())
+
+    // Setup table
+    db.query("CREATE TABLE IF NOT EXISTS users (id serial PRIMARY KEY, name varchar(50) DEFAULT NULL)") ! panic("Error: %{E.message}")
+    db.query("TRUNCATE TABLE users") ! panic("Error: %{E.message}")
+
+    // Insert with parameters
+    db.query("INSERT INTO users (name) VALUES (:name) RETURNING id", .{ "name" => "example" }) ! panic("Error: %{E.message}")
+    let inserted = db.fetch_one() ! panic("Error: %{E.message}")
+    if isset(inserted) : println("Inserted id: " + (inserted["id"] ?? 0).to_int())
+
+    // Select
+    db.bind("name", "example")
+    db.query("SELECT * FROM users WHERE name = :name") ! panic("Error: %{E.message}")
+    let rows = db.fetch_all() ! panic("Error: %{E.message}")
+    println("ROWS: " + rows.length)
+    each rows as row {
+        println("- " + (row["id"] ?? 0).to_int() + ": " + (row["name"] ?? "/").to_string())
+    }
+}

@@ -1,0 +1,85 @@
+test "Multi statement" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    con.query("
+        DROP TABLE IF EXISTS multi_t1;
+        CREATE TABLE multi_t1 (id serial PRIMARY KEY, name text);
+        INSERT INTO multi_t1 (name) VALUES ('v1');
+        INSERT INTO multi_t1 (name) VALUES ('v2'), ('v3');
+    ") ! { println(E.message) assert(false) return }
+    assert(con.affected_rows == 2)
+    assert(con.command_tag == "INSERT 0 2")
+
+    // The rows of every statement are fetched in order
+    con.query("SELECT * FROM multi_t1 ORDER BY id; SELECT count(*) AS c FROM multi_t1") ! { println(E.message) assert(false) return }
+    let r = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(r.length == 4)
+    r.get(0) -> v {
+        assert(v.length == 2)
+        assert((v["id"] ?? 0).to_int() == 1)
+        assert((v["name"] ?? "").to_string() == "v1")
+    }
+    r.get(2) -> v {
+        assert((v["id"] ?? 0).to_int() == 3)
+        assert((v["name"] ?? "").to_string() == "v3")
+    }
+    r.get(3) -> v {
+        assert(v.length == 1)
+        assert((v["c"] ?? 0).to_int() == 3)
+    }
+
+    // Empty queries
+    con.query("") ! { println(E.message) assert(false) return }
+    r = con.fetch_all() ! { println(E.message) assert(false) return }
+    assert(r.length == 0)
+    con.query("  ;  ") ! { println(E.message) assert(false) return }
+    con.query("SELECT 1 AS v") ! { println(E.message) assert(false) return }
+    let row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["v"] ?? 0).to_int() == 1)
+
+    // LISTEN / NOTIFY
+    con.query("LISTEN valk_channel") ! { println(E.message) assert(false) return }
+    con.query("NOTIFY valk_channel, 'payload 1'") ! { println(E.message) assert(false) return }
+    con.query("SELECT 1") ! { println(E.message) assert(false) return }
+    assert(con.notifications.length == 1)
+    con.notifications.get(0) -> n {
+        assert(n.channel == "valk_channel")
+        assert(n.payload == "payload 1")
+        assert(n.process_id == con.process_id)
+    }
+}
+
+fn worker(n: int) bool {
+    let con = connect() ! {
+        println(E.message)
+        return false
+    }
+    defer con.close()
+    let i = 0
+    while i < 20 {
+        con.query("SELECT :n::int * 2 AS v, pg_sleep(0.005)", .{ "n" => n }) ! {
+            println(E.message)
+            return false
+        }
+        let row = con.fetch_one() ! return false
+        if !isset(row) : return false
+        if (row["v"] ?? 0).to_int() != n * 2 : return false
+        i++
+    }
+    return true
+}
+
+test "Concurrent connections" {
+    let a = co worker(1)
+    let b = co worker(2)
+    let c = co worker(3)
+    assert(await a)
+    assert(await b)
+    assert(await c)
+}

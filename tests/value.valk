@@ -1,0 +1,58 @@
+use postgres
+use valk.json
+
+test "Value conversions" {
+    assert(postgres.convert(42).to_int() == 42)
+    assert(postgres.convert(42).to_string() == "42")
+    assert(postgres.convert(true).to_bool())
+    assert(postgres.convert(true).type == postgres.TYPE.bool)
+    assert(postgres.convert(true).to_string() == "true")
+    assert(postgres.convert(false).to_int() == 0)
+    assert(postgres.convert(1.25).to_string() == "1.25")
+    assert(postgres.convert(1.25).to_int() == 1)
+    assert(postgres.convert("42").to_int() == 42)
+    assert(postgres.convert("1.25").to_float() == 1.25)
+    assert(postgres.convert("1.25").to_int() == 1)
+    assert(postgres.convert("t").to_bool())
+    assert(postgres.convert("true").to_bool())
+    assert(!postgres.convert("f").to_bool())
+    assert(!postgres.convert("").to_bool())
+
+    // Null
+    let missing: ?uint = null
+    assert(postgres.convert(missing).type == postgres.TYPE.null)
+    assert(postgres.convert(missing).is_null())
+    assert(!isset(postgres.convert(missing).to_int_or_null()))
+    assert(!isset(postgres.convert(missing).to_string_or_null()))
+    assert(postgres.Value.null().to_string() == "")
+    let present: ?uint = 7
+    assert(postgres.convert(present).to_int() == 7)
+    assert((postgres.convert(present).to_int_or_null() ?? 0) == 7)
+
+    // Arrays
+    let array = postgres.convert(Array[?uint]{ 1, null, 3 })
+    assert(array.type == postgres.TYPE.array)
+    let items = array.array_items
+    assert(isset(items))
+    if isset(items) {
+        assert(items.length == 3)
+        assert((items.get(0) ! panic("Missing item")).to_int() == 1)
+        assert((items.get(1) ! panic("Missing item")).type == postgres.TYPE.null)
+    }
+    assert(array.to_string() == "{1,NULL,3}")
+    assert(postgres.convert(Array[String]{ "a", "b,c", "d\"e" }).to_string() == "{\"a\",\"b,c\",\"d\\\"e\"}")
+    assert(postgres.convert(Array[int]{}).to_string() == "{}")
+
+    // JSON
+    assert(postgres.convert(42).to_json().encode() == "42")
+    assert(postgres.convert("{\"a\":1}").to_json().encode() == "{\"a\":1}")
+    assert(postgres.convert("not json").to_json().encode() == "null")
+    let value: json.Value = json.new_int(7)
+    assert(value.to_pg_value().to_string() == "7")
+    let object = json.decode("{\"a\":[1,2]}") ! panic("Invalid json")
+    assert(postgres.convert(object).to_string() == "{\"a\":[1,2]}")
+
+    // bytea
+    assert(postgres.convert("\\x48656c6c6f").to_bytes() == "Hello")
+    assert(postgres.convert("plain").to_bytes() == "plain")
+}

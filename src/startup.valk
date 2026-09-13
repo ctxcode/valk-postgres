@@ -1,0 +1,52 @@
+extend Connection {
+    fn send_startup() !Error {
+        let s = this.sender
+        s.write_u32_be(PROTOCOL_VERSION)
+        s.write("user")
+        s.write_byte(0)
+        s.write(this.username)
+        s.write_byte(0)
+        let db = this.db
+        if isset(db) {
+            s.write("database")
+            s.write_byte(0)
+            s.write(db)
+            s.write_byte(0)
+        }
+        s.write("client_encoding")
+        s.write_byte(0)
+        s.write("UTF8")
+        s.write_byte(0)
+        s.write_byte(0) // End of parameters
+        this.write_message_untyped()
+        this.send() !>
+    }
+
+    // Answers authentication requests until the server sends AuthenticationOk
+    fn authenticate() !Error {
+        let count = 0
+        while true {
+            if count++ > 10 : throw .protocol { message: "The server keeps asking for authentication" }
+            this.recv() !>
+            this.check_error(false) !>
+            if this.msg_type != 'R' : this.unexpected() !>
+            let r = this.reader
+            let code = r.read_u32_be()
+            if code == AUTH_OK : return
+            if code == AUTH_CLEARTEXT_PASSWORD {
+                this.send_cleartext_password() !>
+                continue
+            }
+            if code == AUTH_MD5_PASSWORD {
+                let salt = r.read_string(4)
+                this.send_md5_password(salt) !>
+                continue
+            }
+            if code == AUTH_SASL {
+                this.sasl_auth() !>
+                continue
+            }
+            throw .unsupported { message: "Unsupported authentication method requested by the server (code %{code})" }
+        }
+    }
+}

@@ -1,0 +1,68 @@
+use postgres
+
+test "SCRAM-SHA-256 authentication" {
+    let con = connect(5432) ! {
+        println("SCRAM: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    assert(con.server_version().length > 0)
+    assert(con.process_id > 0)
+    assert(con.parameters.has("client_encoding"))
+    con.query("SELECT current_user AS u, current_database() AS d") ! { println(E.message) assert(false) return }
+    let row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) {
+        assert((row["u"] ?? "").to_string() == "test")
+        assert((row["d"] ?? "").to_string() == "valk_postgres_tests")
+    }
+}
+
+test "MD5 authentication" {
+    let con = connect(5433) ! {
+        println("MD5: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    con.query("SELECT 1 AS one") ! { println(E.message) assert(false) return }
+    let row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["one"] ?? 0).to_int() == 1)
+}
+
+fn wrong_password(port: u32) bool {
+    let con = postgres.connect("127.0.0.1", "test", "wrong", "valk_postgres_tests", port) ! {
+        assert(error_is(E.code, auth))
+        assert(E.sqlstate == "28P01")
+        assert(E.message.length > 0)
+        return true
+    }
+    con.close()
+    return false
+}
+
+test "Wrong password" {
+    assert(wrong_password(5432))
+    assert(wrong_password(5433))
+}
+
+test "Unknown database" {
+    let con = postgres.connect("127.0.0.1", "test", "root", "does_not_exist", 5432) ! {
+        assert(error_is(E.code, connect))
+        assert(E.sqlstate == "3D000")
+        return
+    }
+    con.close()
+    assert(false)
+}
+
+test "Connection refused" {
+    let con = postgres.connect("127.0.0.1", "test", "root", null, 1) ! {
+        assert(error_is(E.code, connect))
+        return
+    }
+    con.close()
+    assert(false)
+}

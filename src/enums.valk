@@ -1,0 +1,44 @@
+/// How `connect` treats SSL.
++ enum SslMode {
+    /// Never use SSL.
+    disable
+    /// Use SSL when the server supports it, otherwise continue without (the default).
+    prefer
+    /// Fail when the server does not support SSL. The certificate is not verified.
+    require
+    /// Require SSL and verify the server certificate against the system CA store
+    /// and the host name.
+    verify_full
+}
+
+// Postgres type OIDs (pg_type.oid) used to convert text results into typed values
+value OID_BOOL (16)
+value OID_BYTEA (17)
+value OID_INT8 (20)
+value OID_INT2 (21)
+value OID_INT4 (23)
+value OID_TEXT (25)
+value OID_OID (26)
+value OID_JSON (114)
+value OID_FLOAT4 (700)
+value OID_FLOAT8 (701)
+value OID_VARCHAR (1043)
+value OID_NUMERIC (1700)
+value OID_JSONB (3802)
+
+// Protocol constants
+value PROTOCOL_VERSION (196608) // 3.0
+value SSL_REQUEST_CODE (80877103)
+
+// Authentication request codes (payload of an 'R' message)
+value AUTH_OK (0)
+value AUTH_CLEARTEXT_PASSWORD (3)
+value AUTH_MD5_PASSWORD (5)
+value AUTH_SASL (10)
+value AUTH_SASL_CONTINUE (11)
+value AUTH_SASL_FINAL (12)
+
+// Transaction status byte of a ReadyForQuery ('Z') message
+value TRANS_IDLE ('I')
+value TRANS_IN_TRANSACTION ('T')
+value TRANS_FAILED ('E')

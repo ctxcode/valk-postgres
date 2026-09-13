@@ -1,0 +1,128 @@
+use postgres
+
+test "Basics" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    let r: Array[Map[postgres.Value]] = .{}
+
+    // Setup table
+    con.query("DROP TABLE IF EXISTS users") ! { println(E.message) assert(false) return }
+    con.query("CREATE TABLE users (id serial PRIMARY KEY, name varchar(50) DEFAULT NULL)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+
+    // Insert + RETURNING
+    con.query("INSERT INTO users (name) VALUES (:name) RETURNING id", .{ "name" => "valk" }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    let inserted = con.fetch_all() ! { assert(false) return }
+    assert(inserted.length == 1)
+    assert(con.affected_rows == 1)
+    let first = inserted.get(0) ! { assert(false) return }
+    assert((first["id"] ?? 0).to_int() == 1)
+
+    // Select with a named parameter
+    con.query("SELECT * FROM users WHERE name = :name", .{ "name" => "valk" }) ! { println(E.message) assert(false) return }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 1)
+    assert(con.affected_rows == 1)
+    assert(con.command_tag == "SELECT 1")
+
+    // A null parameter matches nothing
+    con.query("SELECT * FROM users WHERE name = :name", .{ "name" => null }) ! {
+        println("ERROR: " + E.message)
+        assert(false)
+        return
+    }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 0)
+
+    // Array expansion
+    con.bind("ids", Array[?uint]{ 1, 2, 3 })
+    con.query("SELECT * FROM users WHERE id IN (:ids)") ! {
+        println("ERROR: " + E.message)
+        assert(false)
+        return
+    }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 1)
+
+    // Bind early
+    con.bind("name", "ctx")
+    con.query("INSERT INTO users (name) VALUES (:name)") ! { println(E.message) assert(false) return }
+    assert(con.affected_rows == 1)
+    assert(con.command_tag == "INSERT 0 1")
+
+    con.bind("ids", Array[uint]{ 1, 2, 3 })
+    con.query("SELECT * FROM users WHERE id IN (:ids) ORDER BY id") ! { assert(false) return }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 2)
+    let row2 = r.get(1) ! { assert(false) return }
+    assert((row2["name"] ?? "").to_string() == "ctx")
+    assert((row2["id"] ?? 0).to_int() == 2)
+
+    // Update / delete
+    con.query("UPDATE users SET name = :name WHERE id > :id", .{ "name" => "x", "id" => 0 }) ! { println(E.message) assert(false) return }
+    assert(con.affected_rows == 2)
+    con.query("DELETE FROM users WHERE id = :id", .{ "id" => 1 }) ! { println(E.message) assert(false) return }
+    assert(con.affected_rows == 1)
+
+    // fetch_one
+    con.query("SELECT name FROM users ORDER BY id") ! { assert(false) return }
+    let one = con.fetch_one() ! { assert(false) return }
+    assert(isset(one))
+    if isset(one) : assert((one["name"] ?? "").to_string() == "x")
+    con.query("SELECT count(*) AS c FROM users") ! { assert(false) return }
+    let cnt = con.fetch_one() ! { assert(false) return }
+    assert(isset(cnt))
+    if isset(cnt) : assert((cnt["c"] ?? 0).to_int() == 1)
+    con.query("SELECT * FROM users WHERE id = :id", .{ "id" => 999 }) ! { assert(false) return }
+    let none = con.fetch_one() ! { assert(false) return }
+    assert(!isset(none))
+
+    // A prepared statement is reused when the query text repeats
+    con.query("SELECT * FROM users WHERE id = :id", .{ "id" => 2 }) ! { assert(false) return }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 1)
+    con.query("SELECT * FROM users WHERE id = :id", .{ "id" => 999 }) ! { assert(false) return }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 0)
+
+    // Starting a new query while rows are pending discards them
+    con.query("SELECT * FROM users") ! { assert(false) return }
+    con.query("SELECT 5 AS v") ! { println(E.message) assert(false) return }
+    let five = con.fetch_one() ! { assert(false) return }
+    assert(isset(five))
+    if isset(five) : assert((five["v"] ?? 0).to_int() == 5)
+
+    // Floats, numeric and null binds
+    con.query("DROP TABLE IF EXISTS numbers") ! { assert(false) return }
+    con.query("CREATE TABLE numbers (id serial PRIMARY KEY, f real, d double precision, n numeric(10,2))") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    con.query("INSERT INTO numbers (f, d, n) VALUES (:f, :d, :n)", .{ "f" => 1.5, "d" => -2.25, "n" => 10.5 }) ! { println(E.message) assert(false) return }
+    con.query("INSERT INTO numbers (f, d, n) VALUES (:f, :d, :n)", .{ "f" => null, "d" => 10000000000.0, "n" => null }) ! { println(E.message) assert(false) return }
+    con.query("SELECT * FROM numbers WHERE id > :id ORDER BY id", .{ "id" => 0 }) ! { println(E.message) assert(false) return }
+    r = con.fetch_all() ! { assert(false) return }
+    assert(r.length == 2)
+    let row1 = r.get(0) ! { assert(false) return }
+    let rowb = r.get(1) ! { assert(false) return }
+    assert((row1["f"] ?? 0.0).to_float() == 1.5)
+    assert((row1["f"] ?? 0.0).type == postgres.TYPE.float)
+    assert((row1["d"] ?? 0.0).to_float() == -2.25)
+    assert((row1["n"] ?? 0.0).to_string() == "10.50")
+    assert((row1["n"] ?? 0.0).to_float() == 10.5)
+    assert(!isset((rowb["f"] ?? 0.0).to_float_or_null()))
+    assert((rowb["f"] ?? 0.0).is_null())
+    assert((rowb["d"] ?? 0.0).to_float() == 10000000000.0)
+}

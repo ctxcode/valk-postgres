@@ -1,0 +1,7 @@
+use postgres
+
+// The servers started by tests/servers.sh
+fn connect(port: u32 (5432), ssl: postgres.SslMode (postgres.SslMode.prefer)) postgres.Connection !postgres.Error {
+    let con = postgres.connect("127.0.0.1", "test", "root", "valk_postgres_tests", port, ssl) !>
+    return con
+}

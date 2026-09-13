@@ -1,0 +1,11 @@
+// Debug helper: prints bytes as "0x..,0x.." without raw pointers
+fn print_bytes(data: &[u8]) {
+    let len = data.length
+    let i: uint = 0
+    while i < len {
+        print("0x")
+        (data.get(i) !? 0).print(16)
+        if ++i < len : print(",")
+    }
+    print("\n")
+}

@@ -1,0 +1,104 @@
+use valk.crypto
+
+extend Connection {
+    fn send_cleartext_password() !Error {
+        let s = this.sender
+        s.write(this.password)
+        s.write_byte(0)
+        this.write_message('p')
+        this.send() !>
+    }
+
+    // "md5" + md5(md5(password + username) + salt), hex encoded
+    fn send_md5_password(salt: String) !Error {
+        let inner = crypto.md5_hex(this.password + this.username)
+        let outer = crypto.md5_hex(inner + salt)
+        let s = this.sender
+        s.write("md5")
+        s.write(outer)
+        s.write_byte(0)
+        this.write_message('p')
+        this.send() !>
+    }
+
+    // SCRAM-SHA-256 (RFC 5802 / RFC 7677) without channel binding
+    fn sasl_auth() !Error {
+        let r = this.reader
+        // Mechanisms offered by the server, terminated by an empty name
+        let has_scram = false
+        while true {
+            let mechanism = r.read_cstring()
+            if mechanism == "" : break
+            if mechanism == "SCRAM-SHA-256" : has_scram = true
+        }
+        if !has_scram : throw .unsupported { message: "The server offers no supported SASL mechanism (only SCRAM-SHA-256 is supported)" }
+
+        let sha256 = crypto.HashAlgorithm.sha256
+
+        // Client first message. The user name is taken from the startup message, so it stays empty here
+        let nonce = crypto.base64_encode(crypto.random_bytes(18))
+        let client_first_bare = "n=,r=" + nonce
+        let client_first = "n,," + client_first_bare
+        let s = this.sender
+        s.write("SCRAM-SHA-256")
+        s.write_byte(0)
+        s.write_u32_be(client_first.length.to(u32))
+        s.write(client_first)
+        this.write_message('p')
+        this.send() !>
+
+        // Server first message: r=<nonce>,s=<salt>,i=<iterations>
+        this.recv() !>
+        this.check_error(false) !>
+        if this.msg_type != 'R' : this.unexpected() !>
+        if r.read_u32_be() != AUTH_SASL_CONTINUE : throw .protocol { message: "Expected a SASL continue message from the server" }
+        let server_first = r.read_remaining_string()
+        let server_nonce = ""
+        let salt_b64 = ""
+        let iterations: uint = 0
+        each server_first.split(",") as part {
+            if part.starts_with("r=") : server_nonce = part.range(2, part.length - 2)
+            else if part.starts_with("s=") : salt_b64 = part.range(2, part.length - 2)
+            else if part.starts_with("i=") : iterations = part.range(2, part.length - 2).to_uint() !? 0
+        }
+        if !server_nonce.starts_with(nonce) : throw .auth { message: "The SCRAM server nonce does not start with the client nonce" }
+        if salt_b64 == "" || iterations == 0 : throw .protocol { message: "Invalid SCRAM server first message" }
+        let salt = crypto.base64_decode(salt_b64) ! throw .protocol { message: "Invalid SCRAM salt" }
+
+        // Keys
+        let salted_password = crypto.pbkdf2(sha256, this.password, salt, iterations, 32) ! throw .auth { message: "Failed to derive the SCRAM password" }
+        let client_key = crypto.Hmac.sign(sha256, salted_password, "Client Key")
+        let stored_key = crypto.hash(sha256, client_key)
+        let client_final_bare = "c=biws,r=" + server_nonce // biws = base64("n,,")
+        let auth_message = client_first_bare + "," + server_first + "," + client_final_bare
+        let client_signature = crypto.Hmac.sign(sha256, stored_key, auth_message)
+        let proof = this.querybuf
+        proof.clear()
+        let i: uint = 0
+        while i < client_key.length {
+            proof.write_byte(client_key[i] ^ client_signature[i])
+            i++
+        }
+
+        // Client final message
+        s.write(client_final_bare)
+        s.write(",p=")
+        s.write(crypto.base64_encode(proof))
+        proof.clear()
+        this.write_message('p')
+        this.send() !>
+
+        // Server final message: v=<signature> or e=<error>
+        this.recv() !>
+        this.check_error(false) !>
+        if this.msg_type != 'R' : this.unexpected() !>
+        if r.read_u32_be() != AUTH_SASL_FINAL : throw .protocol { message: "Expected a SASL final message from the server" }
+        let server_final = r.read_remaining_string()
+        if server_final.starts_with("e=") : throw .auth { message: "SCRAM authentication failed: " + server_final.range(2, server_final.length - 2) }
+        if !server_final.starts_with("v=") : throw .protocol { message: "Invalid SCRAM server final message" }
+        let server_key = crypto.Hmac.sign(sha256, salted_password, "Server Key")
+        let server_signature = crypto.Hmac.sign(sha256, server_key, auth_message)
+        let expected = "v=" + crypto.base64_encode(server_signature)
+        if !crypto.constant_time_equals(expected, server_final) : throw .auth { message: "The SCRAM server signature is invalid" }
+    }
+}

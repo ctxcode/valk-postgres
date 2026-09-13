@@ -1,0 +1,167 @@
+extend Connection {
+    binds: Array[Value] (.{})
+    named_binds: Map[Value] (.{})
+    final_binds: Array[Value] (.{})
+
+    /// Binds a value to the `:name` placeholder of the next query.
+    + fn bind(name: String, value: $T) {
+        this.named_binds.set(name, convert(value))
+    }
+    /// Binds a value to the next `?` placeholder of the next query. Values that are not
+    /// consumed by a `?` are bound to the `$1`, `$2`, ... placeholders in order.
+    + fn bindv(value: $T) {
+        this.binds.append(convert(value))
+    }
+    /// Removes the values bound with `bind` and `bindv`.
+    + fn clear_binds() {
+        this.binds.clear()
+        this.named_binds.clear()
+    }
+
+    // Rewrites `:name` and `?` placeholders into `$1`, `$2`, ... and collects the bound
+    // values in `final_binds`. An array bound to `:name` expands into `$1,$2,$3`.
+    //
+    // Skipped: text in single quotes, identifiers in double quotes, `::` casts and
+    // dollar quoted text. `?` is only a placeholder when positional values are bound,
+    // so the jsonb operators keep working.
+    fn replace_params(query: String) String !Error {
+        let r = this.querybuf
+        r.clear()
+        let binds = this.binds
+        let named = this.named_binds
+        let final_binds = this.final_binds
+        let bindi: uint = 0
+        let has_positional = binds.length > 0
+
+        let i: uint = 0
+        let len = query.length
+        while i < len {
+            let ch = query[i++]
+            if ch == '\'' || ch == '"' {
+                // Copy quoted text as is (a doubled quote inside re-enters and leaves the quotes)
+                r.write_byte(ch)
+                while i < len {
+                    let qch = query[i++]
+                    r.write_byte(qch)
+                    if qch == ch : break
+                }
+                continue
+            }
+            if ch == '$' {
+                // Dollar quoted text: $$...$$ or $tag$...$tag$
+                let end = i
+                while end < len && (query[end].is_alpha_numeric() || query[end] == '_') : end++
+                if end < len && query[end] == '$' && (end == i || !query[i].is_number()) {
+                    let tag = query.range(i - 1, end - i + 2)
+                    let close = query.index_of(tag, end + 1) ! throw .error { message: "Unterminated dollar quoted text in query" }
+                    r.write(query.view(i - 1, close + tag.length - (i - 1)))
+                    i = close + tag.length
+                    continue
+                }
+                r.write_byte(ch)
+                continue
+            }
+            if ch == '-' && i < len && query[i] == '-' {
+                // Line comment
+                r.write_byte(ch)
+                while i < len && query[i] != '\n' : r.write_byte(query[i++])
+                continue
+            }
+            if ch == '/' && i < len && query[i] == '*' {
+                // Block comment
+                let close = query.index_of("*/", i + 1) !? len
+                r.write(query.view(i - 1, close + 2 > len ? len - (i - 1) : close + 2 - (i - 1)))
+                i = close + 2
+                continue
+            }
+            if ch == ':' {
+                if i < len && query[i] == ':' {
+                    // Cast
+                    r.write("::")
+                    i++
+                    continue
+                }
+                let start = i
+                let nch = start < len ? query[start] : 0
+                if nch.is_alpha() || nch == '_' {
+                    let end = start
+                    while end + 1 < len {
+                        let nch = query[end + 1]
+                        if nch.is_alpha_numeric() || nch == '_' {
+                            end++
+                            continue
+                        }
+                        break
+                    }
+                    let name_len = end - start + 1
+                    let name = query.range(start, name_len)
+                    let bindv = named.get(name) ! throw .error { message: "Cannot find named binding: '" + name + "'" }
+                    if bindv.type == TYPE.array {
+                        let items = bindv.array_items
+                        if isset(items) {
+                            each items as val, vi {
+                                if vi > 0 : r.write_byte(',')
+                                this.write_placeholder(r, val)
+                            }
+                        } else {
+                            // An empty array: keep the query valid
+                            r.write("NULL")
+                        }
+                    } else {
+                        this.write_placeholder(r, bindv)
+                    }
+                    i += name_len
+                    continue
+                }
+            } else if ch == '?' && has_positional {
+                let val = binds.get(bindi++) ! throw .error { message: "You have more '?' tokens than the amount of bound values" }
+                this.write_placeholder(r, val)
+                continue
+            }
+            r.write_byte(ch)
+        }
+
+        // Values left over are for explicit $1, $2, ... placeholders
+        while bindi < binds.length {
+            let val = binds.get(bindi++) ! break
+            final_binds.append(val)
+        }
+
+        return r.to_string()
+    }
+
+    fn write_placeholder(q: ByteBuffer, v: Value) {
+        this.final_binds.append(v)
+        q.write_byte('$')
+        q.write_uint_ascii(this.final_binds.length)
+    }
+
+    // Writes a bind value in text format: int32 length (-1 for null) followed by the bytes
+    fn write_param(s: ByteBuffer, v: Value) {
+        let type = v.type
+        if type == TYPE.null {
+            s.write_u32_be(u32.$max)
+            return
+        }
+        if type == TYPE.string {
+            let str = v.string_value
+            s.write_u32_be(str.length.to(u32))
+            s.write(str)
+            return
+        }
+        let scratch = this.querybuf
+        scratch.clear()
+        if type == TYPE.int {
+            scratch.write_int_ascii(v.int_value)
+        } else if type == TYPE.float {
+            scratch.write_f64_ascii_shortest(v.float_value.to(f64))
+        } else if type == TYPE.bool {
+            scratch.write(v.bool_value ? "true" : "false")
+        } else {
+            scratch.write(v.to_string())
+        }
+        s.write_u32_be(scratch.length.to(u32))
+        s.write(scratch)
+        scratch.clear()
+    }
+}

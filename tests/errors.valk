@@ -1,0 +1,108 @@
+use postgres
+
+test "Errors" {
+    let con = connect() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    // Syntax error (simple protocol)
+    let failed = false
+    con.query("SELEC 1") ! {
+        failed = true
+        assert(error_is(E.code, error))
+        assert(E.sqlstate == "42601")
+        assert(E.message.length > 0)
+        assert(E.severity == "ERROR")
+    }
+    assert(failed)
+
+    // The connection stays usable
+    con.query("SELECT 1 AS v") ! { println(E.message) assert(false) return }
+    let row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["v"] ?? 0).to_int() == 1)
+
+    // Error while executing (extended protocol)
+    failed = false
+    con.query("SELECT 1 / :zero::int AS v", .{ "zero" => 0 }) ! {
+        failed = true
+        assert(E.sqlstate == "22012")
+    }
+    assert(failed)
+
+    // Error while parsing (extended protocol)
+    failed = false
+    con.query("SELECT * FROM table_does_not_exist WHERE id = :id", .{ "id" => 1 }) ! {
+        failed = true
+        assert(E.sqlstate == "42P01")
+        assert(E.message.contains("table_does_not_exist"))
+    }
+    assert(failed)
+
+    con.query("SELECT 2 AS v") ! { println(E.message) assert(false) return }
+    row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["v"] ?? 0).to_int() == 2)
+    assert(!con.in_transaction())
+
+    // Error after some rows were sent
+    con.query("SELECT 10 / (5 - n) AS v FROM generate_series(1, 10) AS n") ! { println(E.message) assert(false) return }
+    let r: Map[postgres.Value] = .{}
+    let rows = 0
+    failed = false
+    while true {
+        let more = con.fetch_row(r) ! {
+            failed = true
+            assert(E.sqlstate == "22012")
+            break
+        }
+        if !more : break
+        rows++
+    }
+    assert(failed)
+    assert(rows == 4)
+    con.query("SELECT 3 AS v") ! { println(E.message) assert(false) return }
+    row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["v"] ?? 0).to_int() == 3)
+
+    // Detail and hint
+    con.query("DROP TABLE IF EXISTS err_unique; CREATE TABLE err_unique (id int PRIMARY KEY)") ! { println(E.message) assert(false) return }
+    con.query("INSERT INTO err_unique VALUES (1)") ! { println(E.message) assert(false) return }
+    failed = false
+    con.query("INSERT INTO err_unique VALUES (1)") ! {
+        failed = true
+        assert(E.sqlstate == "23505")
+        assert(E.detail.contains("(1)"))
+    }
+    assert(failed)
+
+    // A failed transaction must be rolled back
+    con.begin() ! { println(E.message) assert(false) return }
+    con.query("SELEC bad") ! {}
+    assert(con.transaction_status == 'E')
+    assert(con.in_transaction())
+    failed = false
+    con.query("SELECT 1") ! {
+        failed = true
+        assert(E.sqlstate == "25P02")
+    }
+    assert(failed)
+    con.rollback() ! { println(E.message) assert(false) return }
+    assert(!con.in_transaction())
+
+    // Notices are kept
+    con.query("DO $$ BEGIN RAISE NOTICE 'hello notice'; END $$") ! { println(E.message) assert(false) return }
+    assert(con.last_notice == "hello notice")
+
+    // A closed connection
+    con.close()
+    con.query("SELECT 1") ! {
+        assert(error_is(E.code, closed))
+        return
+    }
+    assert(false)
+}
