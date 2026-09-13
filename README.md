@@ -4,6 +4,8 @@ A package to query PostgreSQL databases. The package is purely written in Valk a
 
 Requires Valk 0.7.0 or newer.
 
+API documentation: [docs/api.md](docs/api.md), [docs/api-full.md](docs/api-full.md).
+
 ## Install
 
 ```
@@ -70,7 +72,8 @@ Notes:
 
 `./tests/servers.sh up` starts the PostgreSQL containers the tests use (Docker), `make test` runs the tests
 and `./tests/servers.sh down` removes the containers. `make example` builds and runs the local example.
-Override the compiler with `make vc=/path/to/valk test`.
+Override the compiler with `make vc=/path/to/valk test`. `make docs` regenerates the API
+documentation in `docs/api.md` (signatures) and `docs/api-full.md` (with descriptions).
 
 ## Benchmark
 

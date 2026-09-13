@@ -52,9 +52,9 @@ extend Connection {
     + fn col_is_null(index: uint) bool {
         return (this.col_lengths.get(index) !? uint.$max) == uint.$max
     }
-    /// Returns whether column `index` arrived in binary format. Queries with bound values
-    /// that are executed again receive integers, floats, bools, dates and timestamps in
-    /// binary form; `col_view` then holds those bytes instead of text.
+    /// Returns whether column `index` arrived in binary format. A prepared query that runs
+    /// again receives integers, floats, bools, dates and timestamps in binary form;
+    /// `col_view` then holds those bytes instead of text.
     + fn col_binary(index: uint) bool {
         return (this.column_formats.get(index) !? FORMAT_TEXT) == FORMAT_BINARY
     }

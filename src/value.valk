@@ -1,6 +1,7 @@
 use valk.json
 use valk.crypto
 
+/// The kinds of `Value`.
 + enum TYPE {
     null
     int
@@ -16,17 +17,21 @@ use valk.crypto
 /// and every other column type (text, numeric, timestamps, json, uuid, bytea, ...) keeps
 /// the text the server sent as `string`. The `to_*` methods convert between them.
 + class Value {
+    /// Which of the value kinds this is.
     + type: TYPE
     int_value: int (0)
     float_value: float (0)
     string_value: String ("")
     bool_value: bool (false)
+    /// The items when `type` is `array`.
     + array_items: ?Array[Value]
 
+    /// Returns whether the value is NULL.
     + fn is_null() bool {
         return this.type == TYPE.null
     }
 
+    /// Returns the value as a bool: `t`, `true`, `1`, `yes` and `on` are true for text, any number other than 0 is true.
     + fn to_bool() bool $auto {
         let type = this.type
         if type == TYPE.bool : return this.bool_value
@@ -39,6 +44,7 @@ use valk.crypto
         return false
     }
 
+    /// Returns the value as text: the text the server sent, a number, `true`/`false`, or an array literal like `{1,2}`. NULL becomes "".
     + fn to_string() String $auto {
         let type = this.type
         if type == TYPE.string : return this.string_value
@@ -55,6 +61,7 @@ use valk.crypto
         return this.string_value
     }
 
+    /// Returns the value as an integer; text is parsed, floats are truncated, NULL is 0.
     + fn to_int() int $auto {
         let type = this.type
         if type == TYPE.int : return this.int_value
@@ -64,6 +71,7 @@ use valk.crypto
         return this.int_value
     }
 
+    /// Returns the value as a float; text is parsed, NULL is 0.
     + fn to_float() float $auto {
         let type = this.type
         if type == TYPE.float : return this.float_value
@@ -92,28 +100,34 @@ use valk.crypto
         return s
     }
 
+    /// Returns a NULL value.
     + static fn null() Value {
         return Value {
             type: TYPE.null
         }
     }
 
+    /// Like `to_bool`, but null for NULL.
     + fn to_bool_or_null() ?bool $auto {
         if this.type == TYPE.null : return null
         return this.to_bool()
     }
+    /// Like `to_string`, but null for NULL.
     + fn to_string_or_null() ?String $auto {
         if this.type == TYPE.null : return null
         return this.to_string()
     }
+    /// Like `to_int`, but null for NULL.
     + fn to_int_or_null() ?int $auto {
         if this.type == TYPE.null : return null
         return this.to_int()
     }
+    /// Like `to_float`, but null for NULL.
     + fn to_float_or_null() ?float $auto {
         if this.type == TYPE.null : return null
         return this.to_float()
     }
+    /// Like `to_json`, but null for NULL.
     + fn to_json_or_null() ?json.Value $auto {
         if this.type == TYPE.null : return null
         return this.to_json()

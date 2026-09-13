@@ -23,7 +23,7 @@ extend Connection {
     statements: Map[Statement] (.{})
     statement_counter: uint (0)
     scratch_row: Map[Value] (.{})
-    /// Number of prepared statements kept per connection. Queries with bound values are
+    /// Number of prepared statements kept per connection. Single statement queries are
     /// prepared once and reused while they stay in the cache.
     + statement_cache_size: uint (64)
 

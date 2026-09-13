@@ -35,8 +35,11 @@ value RECV_CHUNK (65536)
 
 /// A notification received through `LISTEN`.
 + class Notification {
+    /// Process id of the backend that sent it.
     + process_id: u32
+    /// The channel name given to `NOTIFY`.
     + channel: String
+    /// The payload given to `NOTIFY`, or "".
     + payload: String
 }
 
