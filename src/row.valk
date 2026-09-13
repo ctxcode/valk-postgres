@@ -1,0 +1,103 @@
+// Row access without allocations: the column values stay in the receive buffer and are
+// read on demand with the col_* methods.
+
+extend Connection {
+    col_offsets: Array[uint] (.{})
+    col_lengths: Array[uint] (.{})
+
+    /// Reads the next row without building a map. Its columns are read with the `col_*`
+    /// methods and stay valid until the next `next_row`, `fetch_row` or `query`. Returns
+    /// false when there are no more rows.
+    + fn next_row() bool !Error {
+        this.col_lengths.clear()
+        if !(this.next_row_message() !>) : return false
+        let r = this.reader
+        let offsets = this.col_offsets
+        let lengths = this.col_lengths
+        offsets.clear()
+        let count: uint = r.read_u16_be()
+        if count != this.column_count : throw .protocol { message: "The server sent a row with an unexpected number of columns" }
+        let i: uint = 0
+        while i++ < count {
+            let len = r.read_u32_be()
+            if len == u32.$max {
+                offsets.append(0)
+                lengths.append(uint.$max)
+                continue
+            }
+            offsets.append(r.pos)
+            lengths.append(len)
+            r.skip(len)
+        }
+        return true
+    }
+
+    /// Returns the number of columns of the current result.
+    + fn col_count() uint {
+        return this.column_count
+    }
+    /// Returns the name of column `index`, or "" when there is no such column.
+    + fn col_name(index: uint) String {
+        return this.column_names.get(index) !? ""
+    }
+    /// Returns the index of the column named `name`.
+    + fn col_index(name: String) uint !LookupError {
+        return this.column_names.index_of(name) !>
+    }
+    /// Returns the type oid of column `index` (`pg_type.oid`), or 0 when there is no such column.
+    + fn col_type(index: uint) uint {
+        return this.column_types.get(index) !? 0
+    }
+    /// Returns whether column `index` of the current row is NULL (or missing).
+    + fn col_is_null(index: uint) bool {
+        return (this.col_lengths.get(index) !? uint.$max) == uint.$max
+    }
+    /// Returns the text of column `index` as a view into the receive buffer, empty for NULL.
+    /// The view is valid until the next row is read.
+    + fn col_view(index: uint) &[u8] {
+        let len = this.col_lengths.get(index) !? uint.$max
+        if len == uint.$max : return this.reader.source.view(0, 0)
+        return this.reader.source.view(this.col_offsets.get(index) !? 0, len)
+    }
+    /// Returns column `index` as a new string, "" for NULL.
+    + fn col_string(index: uint) String {
+        return this.col_view(index).to_string()
+    }
+    /// Returns column `index` as an integer, 0 for NULL or text that is not a number.
+    + fn col_int(index: uint) int {
+        return this.col_view(index).to_int() !? 0
+    }
+    /// Returns column `index` as a float, 0 for NULL or text that is not a number.
+    + fn col_float(index: uint) float {
+        return this.col_view(index).to_float() !? 0
+    }
+    /// Returns column `index` as a bool: true for `t`, `true`, `1`, `yes` and `on`.
+    + fn col_bool(index: uint) bool {
+        let v = this.col_view(index)
+        if v.length == 0 : return false
+        let c = v[0]
+        return c == 't' || c == 'T' || c == '1' || c == 'y' || c == 'Y' || c == 'o' && v.length == 2
+    }
+    /// Returns column `index` as a `Value`, typed by the column type like `fetch_row` does.
+    + fn col_value(index: uint) Value {
+        if this.col_is_null(index) : return Value.null()
+        return convert_field(this.col_view(index), this.col_type(index))
+    }
+}
+
+// Converts the text of a column into a Value based on the column type
+fn convert_field(field: &[u8], type: uint) Value {
+    if type == OID_INT2 || type == OID_INT4 || type == OID_INT8 || type == OID_OID {
+        let v = field.to_int() ! return field.to_string()
+        return v
+    }
+    if type == OID_FLOAT4 || type == OID_FLOAT8 {
+        let v = field.to_float() ! return field.to_string()
+        return v
+    }
+    if type == OID_BOOL {
+        let v: bool = field.length > 0 && field[0] == 't'
+        return v
+    }
+    return field.to_string()
+}

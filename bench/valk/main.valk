@@ -66,6 +66,19 @@ fn main(args: Array[String]) {
     }
     report("fetch_rows", fetched, start)
 
+    // 3b. Fetch every row of the table without building maps
+    start = time.mono_us()
+    fetched = 0
+    i = 0
+    while i++ < FETCH_ROUNDS {
+        db.query("SELECT id, name, score, created FROM bench_users") !!
+        while db.next_row() !! {
+            checksum += db.col_int(0).to(uint) + db.col_string(1).length + db.col_int(2).to(uint) + db.col_view(3).length
+            fetched++
+        }
+    }
+    report("fetch_rows_fast", fetched, start)
+
     // 4. Inserts inside one transaction
     start = time.mono_us()
     db.begin() !!

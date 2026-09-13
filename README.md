@@ -48,6 +48,13 @@ let row = db.fetch_one() ! panic("Error: %{E.message}")
 // Transactions
 db.begin() ! panic("Error: %{E.message}")
 db.commit() ! panic("Error: %{E.message}")
+
+// Fetch without allocations: values are read straight from the receive buffer
+db.query("SELECT id, name FROM users") ! panic("Error: %{E.message}")
+while db.next_row() ! panic("Error: %{E.message}") {
+    let id = db.col_int(0)
+    let name = db.col_string(1) // or db.col_view(1) for a &[u8] that lives until the next row
+}
 ```
 
 Notes:
@@ -73,5 +80,6 @@ Operations per second, local PostgreSQL 16:
 | ------------ | --------- | --------- | --------- |
 | ping         | 31,400    | 28,100    | 28,000    |
 | select_by_id | 22,200    | 19,300    | 19,900    |
-| fetch_rows   | 4,150,000 | 5,550,000 | 4,600,000 |
+| fetch_rows   | 4,100,000 | 5,550,000 | 4,500,000 |
+| fetch_rows fast api | 4,280,000 | -      | -         |
 | insert       | 28,600    | 23,500    | 26,500    |

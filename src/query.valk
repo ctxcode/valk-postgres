@@ -321,20 +321,25 @@ extend Connection {
     /// rows of the next statement.
     + fn fetch_row(row: Map[Value]) bool !Error {
         row.clear()
+        if !(this.next_row_message() !>) : return false
+        this.read_data_row(row) !>
+        return true
+    }
+
+    // Reads messages until the next DataRow (true, the reader is at its payload) or the
+    // end of the query (false)
+    fn next_row_message() bool !Error {
         if !this.fetching : return false
 
         this.recv() !>
         this.check_error() !>
 
         let t = this.msg_type
-        if t == 'D' {
-            this.read_data_row(row) !>
-            return true
-        }
+        if t == 'D' : return true
         if t == 'C' || t == 'I' {
             if t == 'C' : this.read_command_complete()
             // More results (a query with several statements)?
-            if this.next_result() !> : return this.fetch_row(row) !>
+            if this.next_result() !> : return this.next_row_message() !>
             return false
         }
         if t == 'Z' {
@@ -362,24 +367,7 @@ extend Connection {
             }
             let field = r.remaining().view(0, len)
             r.skip(len)
-            if type == OID_INT2 || type == OID_INT4 || type == OID_INT8 || type == OID_OID {
-                let v = field.to_int() ! {
-                    row.set(name, field.to_string())
-                    continue
-                }
-                row.set(name, v)
-            } else if type == OID_FLOAT4 || type == OID_FLOAT8 {
-                let v = field.to_float() ! {
-                    row.set(name, field.to_string())
-                    continue
-                }
-                row.set(name, v)
-            } else if type == OID_BOOL {
-                let v: bool = field.length > 0 && field[0] == 't'
-                row.set(name, v)
-            } else {
-                row.set(name, field.to_string())
-            }
+            row.set(name, convert_field(field, type))
         }
     }
 }
