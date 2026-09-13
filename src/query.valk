@@ -300,9 +300,10 @@ extend Connection {
     /// Fetches every remaining row.
     + fn fetch_all() Array[Map[Value]] !Error {
         let result = Array[Map[Value]]{}
-        let row: Map[Value] = .{}
-        while this.fetch_row(row) !> {
-            result.append(row.clone())
+        while true {
+            let row: Map[Value] = .{}
+            if !(this.fetch_row(row) !>) : break
+            result.append(row)
         }
         return result
     }

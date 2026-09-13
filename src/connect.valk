@@ -1,6 +1,9 @@
 use valk.net
 use valk.time
 
+// Bytes asked from the socket per read
+value RECV_CHUNK (65536)
+
 /// Opens a connection and logs in.
 ///
 /// `db` is the database to connect to, or null for the database named after the user.
@@ -47,14 +50,14 @@ use valk.time
     ssl_mode: SslMode
     // Data in
     data_in: ByteBuffer (.new())
-    packet_end: uint (0) // End of the message `reader` currently views inside data_in (compacted on next recv)
+    read_offset: uint (0) // Start of the unread bytes in data_in; everything before was consumed
     reader: ByteReader
     msg_type: u8 (0) // Type byte of the message `reader` currently views
     // Data out
     packetbuf: ByteBuffer (.new())             // Framed messages waiting for send()
     sender: ByteBuffer (.new())                // Payload of the message being built
     querybuf: ByteBuffer (.new())              // Scratch for rewriting queries / encoding parameters
-    recv_scratch: mut &[u8] ([u8]{ 0 x 8192 }) // Reused socket read buffer
+    recv_scratch: mut &[u8] ([u8]{ 0 x 1 }) // For the single byte SSL answer
     // Server info
     /// Runtime parameters reported by the server, such as `server_version` and `TimeZone`.
     ~ parameters: Map[String] (.{})
@@ -185,29 +188,24 @@ use valk.time
         let buf = this.data_in
         let r = this.reader
         while true {
-            // Drop the previous message now that nothing reads from it anymore
-            if this.packet_end > 0 {
-                buf.clear_until(this.packet_end)
-                this.packet_end = 0
-            }
-            let recv_bytes: uint = buf.length
-            while recv_bytes < 5 {
-                recv_bytes += this.recv_into_buffer() !>
-            }
             // Message header: 1 byte type + 4 byte big-endian length (the length includes itself)
+            let offset = this.read_offset
+            while buf.length - offset < 5 {
+                offset = this.recv_into_buffer() !>
+            }
             r.reset()
-            r.source = buf
+            r.source = buf.view(offset, 5)
             let type = r.read_byte()
             let len: uint = r.read_u32_be()
             if len < 4 : throw .protocol { message: "Invalid message length received from the server" }
             let payload_len = len - 4
-            while recv_bytes < (payload_len + 5) {
-                recv_bytes += this.recv_into_buffer() !>
+            while buf.length - offset < payload_len + 5 {
+                offset = this.recv_into_buffer() !>
             }
             // Point the reader at the payload in place; the copy-free view stays valid until the next recv()
             r.reset()
-            r.source = buf.view(5, payload_len)
-            this.packet_end = payload_len + 5
+            r.source = buf.view(offset + 5, payload_len)
+            this.read_offset = offset + 5 + payload_len
             this.msg_type = type
 
             if this.debug {
@@ -249,14 +247,25 @@ use valk.time
         }
     }
 
+    // Reads more bytes from the socket into `data_in` and returns the offset of the unread data.
+    //
+    // Consumed messages are dropped first, so the buffer is compacted once per socket read
+    // instead of once per message.
     fn recv_into_buffer() uint !Error {
-        let data = this.recv_scratch
-        let count = this.con.read(data) ! {
+        let buf = this.data_in
+        let offset = this.read_offset
+        if offset > 0 {
+            buf.clear_until(offset)
+            this.read_offset = 0
+        }
+        buf.reserve(RECV_CHUNK)
+        let spare = buf.view_spare(RECV_CHUNK)
+        let count = this.con.read(spare) ! {
             if error_is(E.code, closed) : throw .closed { message: "The server closed the connection" }
             throw .error { message: "Failed to read bytes from the socket" }
         }
-        this.data_in.write(data.view(0, count))
-        return count
+        buf.skip(count)
+        return 0
     }
 
     // Frames the payload built in `sender` as a message of `type` and queues it in `packetbuf`
