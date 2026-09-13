@@ -1,0 +1,11 @@
+[package]
+name = "bench-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+tokio-postgres = "0.7"
+
+[profile.release]
+opt-level = 3

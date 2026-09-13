@@ -1,2 +1,4 @@
 debug
 example/vendor
+bench/build
+bench/rust/target

@@ -1,0 +1,90 @@
+use postgres
+use valk.time
+
+// Same scenarios as bench/go and bench/rust, one connection, sequential
+value ROWS (10000)
+value FETCH_ROUNDS (20)
+
+fn main(args: Array[String]) {
+    let host = args.get(1) !? "127.0.0.1"
+    let port = (args.get(2) !? "5432").to_uint() !? 5432
+    let n = (args.get(3) !? "20000").to_uint() !? 20000
+
+    let db = postgres.connect(host, "test", "root", "valk_postgres_tests", port.to(u32), postgres.SslMode.disable) ! panic("Failed to connect: %{E.message}")
+    defer db.close()
+
+    // Setup
+    db.query("DROP TABLE IF EXISTS bench_users") !!
+    db.query("CREATE TABLE bench_users (id serial PRIMARY KEY, name text NOT NULL, score int NOT NULL, created timestamptz NOT NULL DEFAULT now())") !!
+    db.query("INSERT INTO bench_users (name, score) SELECT 'user' || g, g FROM generate_series(1, %{ROWS}) AS g") !!
+
+    let row : Map[postgres.Value] = .{}
+
+    // Warmup
+    let i : uint = 0
+    while i++ < 200 {
+        db.query("SELECT 1") !!
+        while db.fetch_row(row) !! {}
+        db.bind("id", i)
+        db.query("SELECT id, name, score FROM bench_users WHERE id = :id") !!
+        while db.fetch_row(row) !! {}
+    }
+
+    // 1. Round trips: simple query
+    let start = time.mono_us()
+    i = 0
+    while i++ < n {
+        db.query("SELECT 1") !!
+        while db.fetch_row(row) !! {}
+    }
+    report("ping", n, start)
+
+    // 2. Prepared statement with a parameter, one row
+    start = time.mono_us()
+    i = 0
+    let checksum : uint = 0
+    while i < n {
+        db.bind("id", (i % ROWS) + 1)
+        db.query("SELECT id, name, score FROM bench_users WHERE id = :id") !!
+        while db.fetch_row(row) !! {
+            checksum += (row["score"] ?? 0).to_int().to(uint)
+        }
+        i++
+    }
+    report("select_by_id", n, start)
+
+    // 3. Fetch every row of the table
+    start = time.mono_us()
+    let fetched : uint = 0
+    i = 0
+    while i++ < FETCH_ROUNDS {
+        db.query("SELECT id, name, score, created FROM bench_users") !!
+        while db.fetch_row(row) !! {
+            checksum += (row["id"] ?? 0).to_int().to(uint) + (row["name"] ?? "").to_string().length
+            fetched++
+        }
+    }
+    report("fetch_rows", fetched, start)
+
+    // 4. Inserts inside one transaction
+    start = time.mono_us()
+    db.begin() !!
+    i = 0
+    while i < n {
+        db.bind("name", "new" + i)
+        db.bind("score", i)
+        db.query("INSERT INTO bench_users (name, score) VALUES (:name, :score)") !!
+        i++
+    }
+    db.commit() !!
+    report("insert", n, start)
+
+    if checksum == 0 : println("checksum: 0")
+}
+
+fn report(name: String, ops: uint, start: uint) {
+    let total_us = time.mono_us() - start
+    let total_ms : float = total_us.to(float) / 1000
+    let per_sec : float = ops.to(float) / (total_us.to(float) / 1000000)
+    println("RESULT " + name + " " + ops + " " + total_ms.to_string(1) + " " + per_sec.to_string(0))
+}
