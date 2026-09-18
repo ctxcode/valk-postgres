@@ -1,0 +1,149 @@
+use postgres
+use sql
+
+fn sql_db() sql.Db !postgres.Error {
+    return postgres.database(connect() !>)
+}
+
+test "Through the sql package" {
+    let db = sql_db() ! { println(E.message) assert(false) return }
+    defer db.close()
+    assert(db.dialect == sql.Dialect.postgres)
+    assert(db.ping())
+
+    db.exec("DROP TABLE IF EXISTS sql_users") ! { println(E.message) assert(false) return }
+    db.exec("CREATE TABLE sql_users (id serial PRIMARY KEY, name text, age int, active boolean, avatar bytea)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+
+    // `?` placeholders are written for Postgres on the way out
+    let changed = db.exec("INSERT INTO sql_users (name, age, active) VALUES (?, ?, ?)", .{
+        sql.Value.of("Ada")
+        sql.Value.of_int(36)
+        sql.Value.of_bool(true)
+    }) ! { println(E.message) assert(false) return }
+    assert(changed == 1)
+
+    db.exec("INSERT INTO sql_users (name, age, active) VALUES (?, ?, ?)", .{
+        sql.Value.of("Bob")
+        sql.Value.of_int(20)
+        sql.Value.of_bool(false)
+    }) ! { assert(false) return }
+
+    let rows = db.all("SELECT * FROM sql_users ORDER BY id") ! { println(E.message) assert(false) return }
+    assert(rows.length == 2)
+    let first = rows.get(0) ! { assert(false) return }
+    assert((first.get("name") !? sql.Value.null()).to_string() == "Ada")
+    assert((first.get("age") !? sql.Value.null()).to_int() == 36)
+    // Postgres has a boolean of its own, so it arrives as one
+    let active = first.get("active") !? sql.Value.null()
+    assert(active.is_bool())
+    assert(active.to_bool())
+    assert((first.get("avatar") !? sql.Value.of("x")).is_null())
+
+    assert((db.value("SELECT count(*) FROM sql_users") ! { assert(false) return }).to_int() == 2)
+    let one = db.one("SELECT * FROM sql_users WHERE name = ?", .{ sql.Value.of("Bob") }) ! { assert(false) return }
+    assert(isset(one))
+    if isset(one) : assert((one.get("age") !? sql.Value.null()).to_int() == 20)
+    assert(!isset(db.one("SELECT * FROM sql_users WHERE name = ?", .{ sql.Value.of("nobody") }) ! { assert(false) return }))
+
+    // RETURNING is how an insert gives its id back here
+    let returned = db.all("INSERT INTO sql_users (name, age, active) VALUES (?, ?, ?) RETURNING id", .{
+        sql.Value.of("Cid")
+        sql.Value.of_int(44)
+        sql.Value.of_bool(true)
+    }) ! { println(E.message) assert(false) return }
+    assert(returned.length == 1)
+    assert(((returned.get(0) !? .{}).get("id") !? sql.Value.null()).to_int() > 0)
+
+    // Errors arrive as sql errors, with the SQLSTATE kept
+    db.exec("INSERT INTO sql_users (id, name) VALUES (1, 'clash')") ! {
+        assert(error_is(E.code, constraint))
+        assert(E.driver_code == "23505")
+    }
+    db.exec("SELECT * FROM nothing_here") ! {
+        assert(error_is(E.code, syntax))
+        assert(E.driver_code.starts_with("42"))
+    }
+    // The connection keeps working after an error
+    assert((db.value("SELECT count(*) FROM sql_users") ! { assert(false) return }).to_int() == 3)
+
+    db.exec("DROP TABLE sql_users") ! { assert(false) return }
+}
+
+test "The builder against Postgres" {
+    let db = sql_db() ! { assert(false) return }
+    defer db.close()
+    db.exec("DROP TABLE IF EXISTS sql_posts") ! { assert(false) return }
+    db.exec("CREATE TABLE sql_posts (id serial PRIMARY KEY, title text, views int, published boolean)") ! { assert(false) return }
+
+    db.insert_into("sql_posts").values(.{ "title" => sql.Value.of("first"), "views" => sql.Value.of_int(10), "published" => sql.Value.of_bool(true) }).run() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    db.insert_into("sql_posts").values(.{ "title" => sql.Value.of("second"), "views" => sql.Value.of_int(3), "published" => sql.Value.of_bool(false) }).run() ! { assert(false) return }
+    db.insert_into("sql_posts").values(.{ "title" => sql.Value.of("third"), "views" => sql.Value.of_int(30), "published" => sql.Value.of_bool(true) }).run() ! { assert(false) return }
+
+    let query = db.select("title, views")
+    query.from("sql_posts")
+    query.where("published = ?", .{ sql.Value.of_bool(true) })
+    query.where("views > ?", .{ sql.Value.of_int(5) })
+    query.order_by("views DESC")
+    let rows = query.all() ! { println(E.message) assert(false) return }
+    assert(rows.length == 2)
+    assert(((rows.get(0) !? .{}).get("title") !? sql.Value.null()).to_string() == "third")
+
+    let in_rows = db.select().from("sql_posts").where_in("title", .{ sql.Value.of("first"), sql.Value.of("second") }).all() ! { assert(false) return }
+    assert(in_rows.length == 2)
+
+    let updated = db.update("sql_posts").set_expression("views", "views + ?", .{ sql.Value.of_int(1) }).where("published = ?", .{ sql.Value.of_bool(true) }).run() ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(updated == 2)
+    let deleted = db.delete_from("sql_posts").where("views < ?", .{ sql.Value.of_int(5) }).run() ! { assert(false) return }
+    assert(deleted == 1)
+
+    db.exec("DROP TABLE sql_posts") ! { assert(false) return }
+}
+
+test "Transactions and migrations on Postgres" {
+    let db = sql_db() ! { assert(false) return }
+    defer db.close()
+    db.exec("DROP TABLE IF EXISTS sql_tx") ! { assert(false) return }
+    db.exec("DROP TABLE IF EXISTS sql_migrations_test") ! { assert(false) return }
+    db.exec("DROP TABLE IF EXISTS schema_migrations") ! { assert(false) return }
+
+    db.exec("CREATE TABLE sql_tx (n int)") ! { assert(false) return }
+    db.transaction(fn(tx: sql.Db) !sql.Error {
+        tx.exec("INSERT INTO sql_tx VALUES (1)") !>
+        tx.exec("INSERT INTO sql_tx VALUES (2)") !>
+    }) ! { println(E.message) assert(false) return }
+    assert((db.value("SELECT count(*) FROM sql_tx") ! { assert(false) return }).to_int() == 2)
+
+    // Postgres rolls a failed transaction back completely
+    db.transaction(fn(tx: sql.Db) !sql.Error {
+        tx.exec("INSERT INTO sql_tx VALUES (3)") !>
+        tx.exec("INSERT INTO nothing_here VALUES (4)") !>
+    }) ! {
+        assert(error_is(E.code, syntax))
+        assert((db.value("SELECT count(*) FROM sql_tx") ! { assert(false) return }).to_int() == 2)
+    }
+
+    // Migrations
+    let migrator = sql.Migrator.new(db)
+    migrator.add("0001-create.sql", "CREATE TABLE sql_migrations_test (id serial PRIMARY KEY, name text NOT NULL);")
+    migrator.add("0002-index.sql", "CREATE INDEX sql_migrations_name ON sql_migrations_test (name);")
+    let ran = migrator.migrate() ! { println(E.message) assert(false) return }
+    assert(ran.length == 2)
+    assert((migrator.migrate() ! { assert(false) return }).length == 0)
+    db.exec("INSERT INTO sql_migrations_test (name) VALUES (?)", .{ sql.Value.of("x") }) ! { println(E.message) assert(false) return }
+
+    db.exec("DROP TABLE sql_tx") ! { assert(false) return }
+    db.exec("DROP TABLE sql_migrations_test") ! { assert(false) return }
+    db.exec("DROP TABLE schema_migrations") ! { assert(false) return }
+}

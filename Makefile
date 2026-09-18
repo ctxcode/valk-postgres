@@ -4,6 +4,8 @@ test:
 	$(vc) build ./tests --test --run
 test-basic:
 	$(vc) build ./tests --test --run --filter "Basics"
+deps:
+	vman install
 lint:
 	$(vc) build ./src --lint
 example:
@@ -16,4 +18,4 @@ servers:
 servers-down:
 	./tests/servers.sh down
 
-.PHONY: test test-basic lint example docs servers servers-down
+.PHONY: deps test test-basic lint example docs servers servers-down

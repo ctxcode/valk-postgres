@@ -3,6 +3,9 @@
     "dependencies": {
         "postgres": {
             "src": "../"
+        },
+        "sql": {
+            "src": "../vendor/github-ctxcode-valk-sql/0.1.2"
         }
     }
 }
