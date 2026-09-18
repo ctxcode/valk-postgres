@@ -2,7 +2,7 @@
 
 A package to query PostgreSQL databases. The package is purely written in Valk and has no os-package dependencies.
 
-Requires Valk 0.7.0 or newer.
+Requires Valk 0.7.3 or newer.
 
 API documentation: [docs/api.md](docs/api.md), [docs/api-full.md](docs/api-full.md).
 
