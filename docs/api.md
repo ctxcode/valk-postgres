@@ -7,6 +7,22 @@ Namespaces: [main](#main)
 
 # main
 
+## Errors for 'main'
+
+```js
+// Thrown by every operation of this package.
++ error Error (connect, ssl, auth, unsupported, protocol, error, closed) payload { message: String, sqlstate: String (""), severity: String (""), detail: String (""), hint: String ("") }
+```
+
+## Enums for 'main'
+
+```js
+// How `connect` treats SSL.
++ enum SslMode { disable, prefer, require, verify_full }
+// The kinds of `Value`.
++ enum TYPE { null, int, float, string, bool, array }
+```
+
 ## Functions for 'main'
 
 ```js
@@ -14,6 +30,8 @@ Namespaces: [main](#main)
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.
 + fn convert(ndata: $T) Value
+// Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
++ fn database(con: Connection) Db
 ```
 
 ## Classes for 'main'
@@ -35,6 +53,8 @@ Namespaces: [main](#main)
     ~ parameters: Map[String]
     // Process id of the server backend serving this connection.
     ~ process_id: u32
+    // Counts the statements that have run, so that the rows of a query can tell whether another statement took the connection from under them.
+    ~+ query_serial: uint
     // Number of prepared statements kept per connection. Single statement queries are prepared once and reused while they stay in the cache.
     + statement_cache_size: uint
     // Transaction status of the last ReadyForQuery: 'I' idle, 'T' in a transaction, 'E' in a failed transaction.

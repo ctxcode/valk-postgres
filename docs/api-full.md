@@ -7,6 +7,44 @@ Namespaces: [main](#main)
 
 # main
 
+## Errors for 'main'
+
+```js
+// Thrown by every operation of this package.
++ error Error (connect, ssl, auth, unsupported, protocol, error, closed) payload { message: String, sqlstate: String (""), severity: String (""), detail: String (""), hint: String ("") }
+```
+
+### Error
+
+Thrown by every operation of this package.
+
+- `connect`: the TCP connection or the startup handshake failed.
+- `ssl`: SSL was required but could not be established.
+- `auth`: the server rejected the credentials.
+- `unsupported`: the server asked for something this package does not implement.
+- `protocol`: the server sent bytes this package did not expect.
+- `error`: the server reported an error for a query. `sqlstate` holds the SQLSTATE
+  (for example `42P01` for an unknown table), `message`, `detail` and `hint` the
+  text the server sent.
+- `closed`: the connection is closed.
+
+## Enums for 'main'
+
+```js
+// How `connect` treats SSL.
++ enum SslMode { disable, prefer, require, verify_full }
+// The kinds of `Value`.
++ enum TYPE { null, int, float, string, bool, array }
+```
+
+### SslMode
+
+How `connect` treats SSL.
+
+### TYPE
+
+The kinds of `Value`.
+
 ## Functions for 'main'
 
 ```js
@@ -14,6 +52,8 @@ Namespaces: [main](#main)
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.
 + fn convert(ndata: $T) Value
+// Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
++ fn database(con: Connection) Db
 ```
 
 ### connect
@@ -28,6 +68,24 @@ Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA
 
 Converts any supported value (integers, floats, bools, strings, json values, arrays of
 those, and nullable versions) into a `Value`.
+
+### database
+
+Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
+
+Everything `valk-sql` offers — the query builder, migrations, pools, rows read into your own
+classes — then works on this database, and the same code runs on SQLite or MySQL by opening
+it with their driver instead.
+
+The connection itself stays usable: this is a view of it, not a replacement.
+
+```valk
+use sql
+use postgres
+
+let db = postgres.database(postgres.connect("127.0.0.1", "user", "password", "app") ! panic("%{E.message}"))
+db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic("%{E.message}")
+```
 
 ## Classes for 'main'
 
@@ -48,6 +106,8 @@ those, and nullable versions) into a `Value`.
     ~ parameters: Map[String]
     // Process id of the server backend serving this connection.
     ~ process_id: u32
+    // Counts the statements that have run, so that the rows of a query can tell whether another statement took the connection from under them.
+    ~+ query_serial: uint
     // Number of prepared statements kept per connection. Single statement queries are prepared once and reused while they stay in the cache.
     + statement_cache_size: uint
     // Transaction status of the last ReadyForQuery: 'I' idle, 'T' in a transaction, 'E' in a failed transaction.
@@ -136,6 +196,11 @@ Runtime parameters reported by the server, such as `server_version` and `TimeZon
 #### process_id
 
 Process id of the server backend serving this connection.
+
+#### query_serial
+
+Counts the statements that have run, so that the rows of a query can tell whether
+another statement took the connection from under them.
 
 #### statement_cache_size
 
