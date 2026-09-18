@@ -89,6 +89,9 @@ API stays there for the paths where every allocation counts.
 
 ## Development
 
+`make deps` fetches the `valk-sql` package the `database()` adapter needs; the tests build
+against it from `vendor/`.
+
 `./tests/servers.sh up` starts the PostgreSQL containers the tests use (Docker), `make test` runs the tests
 and `./tests/servers.sh down` removes the containers. `make example` builds and runs the local example.
 Override the compiler with `make vc=/path/to/valk test`. `make docs` regenerates the API
