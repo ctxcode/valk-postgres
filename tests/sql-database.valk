@@ -147,3 +147,55 @@ test "Transactions and migrations on Postgres" {
     db.exec("DROP TABLE sql_migrations_test") ! { assert(false) return }
     db.exec("DROP TABLE schema_migrations") ! { assert(false) return }
 }
+
+test "Conditions that mix AND and OR on Postgres" {
+    let db = sql_db() ! { assert(false) return }
+    defer db.close()
+    db.exec("DROP TABLE IF EXISTS sql_mixed") ! { assert(false) return }
+    db.exec("CREATE TABLE sql_mixed (id serial PRIMARY KEY, name text, role text, score int, active boolean)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+
+    let rows = Array[Array[sql.Value]]{
+        .{ sql.Value.of("ada"),   sql.Value.of("admin"),  sql.Value.of_int(10),  sql.Value.of_bool(true) }
+        .{ sql.Value.of("bob"),   sql.Value.of("member"), sql.Value.of_int(150), sql.Value.of_bool(true) }
+        .{ sql.Value.of("dora"),  sql.Value.of("admin"),  sql.Value.of_int(30),  sql.Value.of_bool(false) }
+        .{ sql.Value.of("eve"),   sql.Value.of("owner"),  sql.Value.null(),      sql.Value.of_bool(true) }
+    }
+    each rows as row {
+        db.exec("INSERT INTO sql_mixed (name, role, score, active) VALUES (?, ?, ?, ?)", row) ! {
+            println(E.message)
+            assert(false)
+            return
+        }
+    }
+
+    // The placeholders are numbered $1, $2, ... in the order the conditions nest
+    let found = db.select("name")
+        .from("sql_mixed")
+        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where_group(fn(w: sql.Conditions) {
+            w.where("role = ?", .{ sql.Value.of("admin") })
+            w.or_where("score > ?", .{ sql.Value.of_int(100) })
+        })
+        .order_by("name")
+        .all() ! { println(E.message) assert(false) return }
+    assert(found.length == 2)
+    assert(((found.get(0) !? .{}).get("name") !? sql.Value.null()).to_string() == "ada")
+    assert(((found.get(1) !? .{}).get("name") !? sql.Value.null()).to_string() == "bob")
+
+    // A NULL score is found by the group that allows it
+    let owners = db.select("name")
+        .from("sql_mixed")
+        .where("role = ?", .{ sql.Value.of("owner") })
+        .where_group(fn(w: sql.Conditions) {
+            w.where("score > ?", .{ sql.Value.of_int(4) })
+            w.or_where_null("score")
+        })
+        .all() ! { println(E.message) assert(false) return }
+    assert(owners.length == 1)
+
+    db.exec("DROP TABLE sql_mixed") ! { assert(false) return }
+}
