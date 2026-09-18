@@ -199,3 +199,49 @@ test "Conditions that mix AND and OR on Postgres" {
 
     db.exec("DROP TABLE sql_mixed") ! { assert(false) return }
 }
+
+test "Chunking and rows taken over, on Postgres" {
+    let db = sql_db() ! { assert(false) return }
+    defer db.close()
+    db.exec("DROP TABLE IF EXISTS sql_chunks") ! { assert(false) return }
+    db.exec("CREATE TABLE sql_chunks (id serial PRIMARY KEY, name text, checked boolean DEFAULT false)") ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    let i: uint = 0
+    while i++ < 120 : db.exec("INSERT INTO sql_chunks (name) VALUES (?)", .{ sql.Value.of("row " + i) }) ! { assert(false) return }
+
+    // Pages, with the last one short
+    let pages: Array[uint] = .{}
+    let seen = db.select().from("sql_chunks").order_by("id").chunk(50, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        pages.append(rows.length)
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(seen == 120)
+    assert(pages.length == 3)
+
+    // Walking by id while writing to every row
+    let updated = db.select().from("sql_chunks").chunk_by_id("id", 40, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        each rows as row {
+            db.exec("UPDATE sql_chunks SET checked = true WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+        }
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(updated == 120)
+    assert((db.value("SELECT count(*) FROM sql_chunks WHERE checked") ! { assert(false) return }).to_int() == 120)
+
+    // A statement in the middle of a walk is reported rather than ending it quietly
+    let rows = db.query("SELECT id FROM sql_chunks ORDER BY id") ! { assert(false) return }
+    let row: Map[sql.Value] = .{}
+    rows.next(row) ! { assert(false) return }
+    db.exec("UPDATE sql_chunks SET checked = false WHERE id = 1") ! { assert(false) return }
+    rows.next(row) ! {
+        assert(error_is(E.code, error))
+        assert(E.message.contains("another statement ran"))
+        rows.close()
+        db.exec("DROP TABLE sql_chunks") ! { assert(false) return }
+        return
+    }
+    assert(false)
+}

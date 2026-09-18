@@ -16,6 +16,9 @@ extend Connection {
     /// Rows affected by the last completed command (`INSERT`, `UPDATE`, `DELETE`, ...).
     /// For a `SELECT` it is the row count, known once every row has been fetched.
     ~ affected_rows: uint (0)
+    /// Counts the statements that have run, so that the rows of a query can tell whether
+    /// another statement took the connection from under them.
+    ~+ query_serial: uint (0)
     /// Command tag of the last completed command, such as `INSERT 0 1`.
     ~ command_tag: String ("")
     fetching: bool (false)
@@ -38,6 +41,7 @@ extend Connection {
         if this.in_progress : this.stop_query()
         //
         this.in_progress = true
+        this.query_serial++
         this.affected_rows = 0
         this.command_tag = ""
         this.column_count = 0
