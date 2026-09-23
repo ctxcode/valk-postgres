@@ -40,8 +40,7 @@ extend Connection {
         if isset(ca_file) : ssl.set_ca_cert(ca_file) ! throw .ssl { message: "Cannot read the CA file '" + ca_file + "'" }
         let certificate = options.certificate_file
         if isset(certificate) {
-            let key_file = options.private_key_file
-            let key = isset(key_file) ? key_file : certificate
+            let key = options.private_key_file ?? certificate
             ssl.set_certificate(certificate, key, options.key_password) ! {
                 throw .ssl { message: "Cannot use the client certificate '" + certificate + "' with the key '" + key + "'" }
             }
