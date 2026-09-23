@@ -50,6 +50,8 @@ The kinds of `Value`.
 ```js
 // Opens a connection and logs in.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
+// Same as `connect`, with SSL settings beyond the mode: the CA file that the server certificate must lead to, and a client certificate for a server that asks for one.
++ fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.
 + fn convert(ndata: $T) Value
 // Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
@@ -63,6 +65,19 @@ Opens a connection and logs in.
 `db` is the database to connect to, or null for the database named after the user.
 `ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`).
 Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA-256.
+
+### connect_with
+
+Same as `connect`, with SSL settings beyond the mode: the CA file that the server
+certificate must lead to, and a client certificate for a server that asks for one.
+
+```valk
+let con = postgres.connect_with("db.internal", "app", "", "app", 5432, postgres.SslOptions {
+    ca_file: "/etc/ssl/db-ca.pem"
+    certificate_file: "/etc/ssl/app.crt"
+    private_key_file: "/etc/ssl/app.key"
+}) ! panic("%{E.message}")
+```
 
 ### convert
 
@@ -363,6 +378,48 @@ The payload given to `NOTIFY`, or "".
 #### process_id
 
 Process id of the backend that sent it.
+
+```js
+// SSL settings for `connect_with`.
++ class SslOptions {
+    // A PEM file with CA certificates to trust besides the system store, for a server certificate from a private CA. Only checked in `verify_full` mode.
+    + ca_file: ?String
+    // A PEM file with the client certificate, optionally followed by the intermediate certificates, sent when the server asks for one (`clientcert` in `pg_hba.conf`).
+    + certificate_file: ?String
+    // The password of an encrypted private key.
+    + key_password: String
+    // How SSL is used. The default verifies the server certificate and its host name.
+    + mode: SslMode
+    // The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
+    + private_key_file: ?String
+}
+```
+
+### SslOptions
+
+SSL settings for `connect_with`.
+
+#### ca_file
+
+A PEM file with CA certificates to trust besides the system store, for a server
+certificate from a private CA. Only checked in `verify_full` mode.
+
+#### certificate_file
+
+A PEM file with the client certificate, optionally followed by the intermediate
+certificates, sent when the server asks for one (`clientcert` in `pg_hba.conf`).
+
+#### key_password
+
+The password of an encrypted private key.
+
+#### mode
+
+How SSL is used. The default verifies the server certificate and its host name.
+
+#### private_key_file
+
+The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
 
 ```js
 // A value read from a result row or bound to a query.

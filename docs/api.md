@@ -28,6 +28,8 @@ Namespaces: [main](#main)
 ```js
 // Opens a connection and logs in.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
+// Same as `connect`, with SSL settings beyond the mode: the CA file that the server certificate must lead to, and a client certificate for a server that asks for one.
++ fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.
 + fn convert(ndata: $T) Value
 // Returns the connection as a `sql.Db`, the database type of the `valk-sql` package.
@@ -128,6 +130,22 @@ Namespaces: [main](#main)
     + payload: String
     // Process id of the backend that sent it.
     + process_id: u32
+}
+```
+
+```js
+// SSL settings for `connect_with`.
++ class SslOptions {
+    // A PEM file with CA certificates to trust besides the system store, for a server certificate from a private CA. Only checked in `verify_full` mode.
+    + ca_file: ?String
+    // A PEM file with the client certificate, optionally followed by the intermediate certificates, sent when the server asks for one (`clientcert` in `pg_hba.conf`).
+    + certificate_file: ?String
+    // The password of an encrypted private key.
+    + key_password: String
+    // How SSL is used. The default verifies the server certificate and its host name.
+    + mode: SslMode
+    // The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
+    + private_key_file: ?String
 }
 ```
 

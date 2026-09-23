@@ -2,7 +2,7 @@
 
 A package to query PostgreSQL databases. The package is purely written in Valk and has no os-package dependencies.
 
-Requires Valk 0.7.3 or newer.
+Requires Valk 0.7.5 or newer.
 
 API documentation: [docs/api.md](docs/api.md), [docs/api-full.md](docs/api-full.md).
 
@@ -66,7 +66,7 @@ Notes:
 - `affected_rows` holds the row count of the last command. Use `RETURNING` for generated ids.
 - Server errors carry the SQLSTATE in `E.sqlstate`.
 - Single statement queries are prepared and cached. From their second run, integers, floats, bools, dates and timestamps arrive in binary form, which is faster; the values you see are the same.
-- SSL: pass `postgres.SslMode.disable`, `prefer` (default), `require` or `verify_full` as the last argument of `connect`.
+- SSL: pass `postgres.SslMode.disable`, `prefer` (default), `require` or `verify_full` as the last argument of `connect`. `connect_with` takes a `postgres.SslOptions` instead, which adds a CA file for the server certificate and a client certificate for servers that ask for one.
 
 ## With valk-sql
 

@@ -4,3 +4,4 @@ bench/build
 bench/rust/target
 vendor
 tests/vendor
+tests/certs

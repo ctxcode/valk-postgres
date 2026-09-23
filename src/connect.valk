@@ -10,6 +10,20 @@ value RECV_CHUNK (65536)
 /// `ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`).
 /// Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA-256.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error {
+    return connect_with(host, user, password, db, port, SslOptions { mode: ssl }) !>
+}
+
+/// Same as `connect`, with SSL settings beyond the mode: the CA file that the server
+/// certificate must lead to, and a client certificate for a server that asks for one.
+///
+/// ```valk
+/// let con = postgres.connect_with("db.internal", "app", "", "app", 5432, postgres.SslOptions {
+///     ca_file: "/etc/ssl/db-ca.pem"
+///     certificate_file: "/etc/ssl/app.crt"
+///     private_key_file: "/etc/ssl/app.key"
+/// }) ! panic("%{E.message}")
+/// ```
++ fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error {
     let sock = net.tcp_client(host, port.to(u16)) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
 
     let con = Connection {
@@ -18,7 +32,7 @@ value RECV_CHUNK (65536)
         username: user
         password: password
         db: db
-        ssl_mode: ssl
+        ssl: ssl
         reader: ByteReader.new("")
     }
     // A query may legitimately run for a long time; connecting had its own timeout
@@ -50,7 +64,7 @@ value RECV_CHUNK (65536)
     username: String
     password: String
     db: ?String
-    ssl_mode: SslMode
+    ssl: SslOptions
     // Data in
     data_in: ByteBuffer (.new())
     read_offset: uint (0) // Start of the unread bytes in data_in; everything before was consumed
@@ -80,7 +94,7 @@ value RECV_CHUNK (65536)
     ~ closed: bool (false)
 
     fn init() !Error {
-        if this.ssl_mode != SslMode.disable : this.enable_ssl() !>
+        if this.ssl.mode != SslMode.disable : this.enable_ssl() !>
         this.send_startup() !>
         this.authenticate() !>
         // Collect the parameter status and key data messages until ReadyForQuery

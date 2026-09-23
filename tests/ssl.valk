@@ -42,3 +42,82 @@ test "SSL" {
     preferred_ssl.close()
     assert(ssl_fails(5434, postgres.SslMode.verify_full))
 }
+
+// Files tests/servers.sh made for the server on 5435, which asks for a client certificate
+fn test_cert(name: String) String {
+    return __DIR__ + "/certs/" + name
+}
+fn connect_mtls(options: postgres.SslOptions) postgres.Connection !postgres.Error {
+    let con = postgres.connect_with("127.0.0.1", "test", "root", "valk_postgres_tests", 5435, options) !>
+    return con
+}
+fn mtls_fails(options: postgres.SslOptions) bool {
+    let con = connect_mtls(options) ! return error_is(E.code, ssl)
+    con.close()
+    return false
+}
+fn client_dn(con: postgres.Connection) String {
+    con.query("SELECT client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()") ! return ""
+    let row = con.fetch_one() ! return ""
+    if !isset(row) : return ""
+    return (row["client_dn"] ?? "").to_string()
+}
+
+test "SSL client certificate" {
+    // Without a certificate the server refuses the login
+    let anonymous = connect_mtls(postgres.SslOptions { ca_file: test_cert("ca.crt") }) ! {
+        assert(error_is(E.code, auth))
+        return
+    }
+    anonymous.close()
+    assert(false)
+
+    // With one, and the server certificate checked against the test CA
+    let con = connect_mtls(postgres.SslOptions {
+        ca_file: test_cert("ca.crt")
+        certificate_file: test_cert("client.crt")
+        private_key_file: test_cert("client.key")
+    }) ! { println(E.message) assert(false) return }
+    assert(con.ssl_enabled())
+    assert(client_dn(con) == "/CN=test")
+    con.close()
+
+    // An encrypted key with its password
+    let encrypted = connect_mtls(postgres.SslOptions {
+        ca_file: test_cert("ca.crt")
+        certificate_file: test_cert("client.crt")
+        private_key_file: test_cert("client-encrypted.key")
+        key_password: "secret"
+    }) ! { println(E.message) assert(false) return }
+    assert(client_dn(encrypted) == "/CN=test")
+    encrypted.close()
+
+    // Without verification the CA file is not needed
+    let unverified = connect_mtls(postgres.SslOptions {
+        mode: postgres.SslMode.require
+        certificate_file: test_cert("client.crt")
+        private_key_file: test_cert("client.key")
+    }) ! { println(E.message) assert(false) return }
+    assert(client_dn(unverified) == "/CN=test")
+    unverified.close()
+}
+
+test "SSL client certificate errors" {
+    // A wrong password, and a key that belongs to another certificate
+    assert(mtls_fails(postgres.SslOptions {
+        ca_file: test_cert("ca.crt")
+        certificate_file: test_cert("client.crt")
+        private_key_file: test_cert("client-encrypted.key")
+        key_password: "wrong"
+    }))
+    assert(mtls_fails(postgres.SslOptions {
+        ca_file: test_cert("ca.crt")
+        certificate_file: test_cert("client.crt")
+        private_key_file: test_cert("server.key")
+    }))
+    // The system store alone does not cover the test CA
+    assert(mtls_fails(postgres.SslOptions {
+        certificate_file: test_cert("client.crt")
+        private_key_file: test_cert("client.key")
+    }))
+}
