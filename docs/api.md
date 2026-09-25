@@ -98,6 +98,12 @@ Namespaces: [main](#main)
     + fn col_view(index: uint) &[u8]
     // Runs `COMMIT`.
     + fn commit() void !Error
+    // Runs a `COPY ... FROM STDIN` statement and sends it everything `data` reads, such as a CSV file. Returns the number of rows copied.
+    + fn copy_in(statement: String, data: Reader) uint !Error
+    // Runs a `COPY ... TO STDOUT` statement and writes what the server sends to `out`, such as a file. Returns the number of rows copied.
+    + fn copy_out(statement: String, out: Writer) uint !Error
+    // Inserts `rows` into `table` with one `COPY`, which is many times faster than an `INSERT` per row. Every row holds the values of `columns` in that order; null stores NULL. Returns the number of rows.
+    + fn copy_rows(table: String, columns: Array[String], rows: Array[Array[?Value]]) uint !Error
     // Fetches every remaining row.
     + fn fetch_all() Array[Map[Value]] !Error
     // Fetches the next row and discards the rest. Returns null when there is no row.
@@ -118,6 +124,8 @@ Namespaces: [main](#main)
     + fn set_timeouts(read_timeout_ms: uint, write_timeout_ms: uint) void
     // Returns whether the connection is encrypted with SSL.
     + fn ssl_enabled() bool
+    // Waits for a notification on a channel this connection listens to (`LISTEN name`) and returns the oldest one, or null when none arrives within `timeout_ms`; 0 waits forever.
+    + fn wait_notification(timeout_ms: uint (0)) ?Notification !Error
 }
 ```
 

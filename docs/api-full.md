@@ -164,6 +164,12 @@ db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic
     + fn col_view(index: uint) &[u8]
     // Runs `COMMIT`.
     + fn commit() void !Error
+    // Runs a `COPY ... FROM STDIN` statement and sends it everything `data` reads, such as a CSV file. Returns the number of rows copied.
+    + fn copy_in(statement: String, data: Reader) uint !Error
+    // Runs a `COPY ... TO STDOUT` statement and writes what the server sends to `out`, such as a file. Returns the number of rows copied.
+    + fn copy_out(statement: String, out: Writer) uint !Error
+    // Inserts `rows` into `table` with one `COPY`, which is many times faster than an `INSERT` per row. Every row holds the values of `columns` in that order; null stores NULL. Returns the number of rows.
+    + fn copy_rows(table: String, columns: Array[String], rows: Array[Array[?Value]]) uint !Error
     // Fetches every remaining row.
     + fn fetch_all() Array[Map[Value]] !Error
     // Fetches the next row and discards the rest. Returns null when there is no row.
@@ -184,6 +190,8 @@ db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic
     + fn set_timeouts(read_timeout_ms: uint, write_timeout_ms: uint) void
     // Returns whether the connection is encrypted with SSL.
     + fn ssl_enabled() bool
+    // Waits for a notification on a channel this connection listens to (`LISTEN name`) and returns the oldest one, or null when none arrives within `timeout_ms`; 0 waits forever.
+    + fn wait_notification(timeout_ms: uint (0)) ?Notification !Error
 }
 ```
 
@@ -302,6 +310,44 @@ The view is valid until the next row is read. See `col_binary`.
 
 Runs `COMMIT`.
 
+#### copy_in
+
+Runs a `COPY ... FROM STDIN` statement and sends it everything `data` reads, such as a
+CSV file. Returns the number of rows copied.
+
+The data must be in the format the statement names: text (tab separated, the default),
+`csv` or `binary`. When reading `data` fails, the copy is called off and nothing of it is
+stored.
+
+```valk
+let file = fs.stream("users.csv") ! panic("cannot open the file")
+let count = con.copy_in("COPY users (name, email) FROM STDIN (FORMAT csv, HEADER)", file) ! panic("%{E.message}")
+```
+
+#### copy_out
+
+Runs a `COPY ... TO STDOUT` statement and writes what the server sends to `out`, such
+as a file. Returns the number of rows copied.
+
+```valk
+let file = fs.stream("users.csv", fs.OpenOptions { write: true, create: true, truncate: true }) ! panic("cannot open the file")
+con.copy_out("COPY (SELECT name, email FROM users) TO STDOUT (FORMAT csv, HEADER)", file) ! panic("%{E.message}")
+```
+
+#### copy_rows
+
+Inserts `rows` into `table` with one `COPY`, which is many times faster than an `INSERT`
+per row. Every row holds the values of `columns` in that order; null stores NULL.
+Returns the number of rows.
+
+The table and column names are quoted as given, so they must match exactly: the
+lower case form of a name that was not quoted when the table was made. A name with a
+schema is written `schema.table`.
+
+```valk
+con.copy_rows("users", .{ "name", "age" }, .{ .{ "Ada", 36 }, .{ "Bob", null } }) ! panic("%{E.message}")
+```
+
 #### fetch_all
 
 Fetches every remaining row.
@@ -350,6 +396,23 @@ Sets the socket read and write timeouts in milliseconds; 0 waits forever (the de
 #### ssl_enabled
 
 Returns whether the connection is encrypted with SSL.
+
+#### wait_notification
+
+Waits for a notification on a channel this connection listens to (`LISTEN name`) and
+returns the oldest one, or null when none arrives within `timeout_ms`; 0 waits forever.
+
+One that already arrived during another query is returned at once. The connection must
+be idle: not in the middle of reading the rows of a query. Inside a coroutine only the
+coroutine waits.
+
+```valk
+con.query("LISTEN jobs") ! panic("%{E.message}")
+while true {
+    let job = con.wait_notification(30_000) ! break
+    if isset(job) : println("new job: " + job.payload)
+}
+```
 
 ```js
 // A notification received through `LISTEN`.
