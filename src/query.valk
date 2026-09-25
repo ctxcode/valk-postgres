@@ -89,6 +89,14 @@ extend Connection {
         this.query("ROLLBACK") !>
     }
 
+    // The state a statement starts from
+    fn start_statement() {
+        this.in_progress = true
+        this.query_serial++
+        this.affected_rows = 0
+        this.command_tag = ""
+    }
+
     fn reset_query_state() {
         this.in_progress = false
         this.fetching = false

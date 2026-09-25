@@ -1,0 +1,229 @@
+use valk.io
+
+// Bytes gathered into one CopyData message, and queued messages sent at once
+value COPY_CHUNK (65536)
+value COPY_SEND (262144)
+
+extend Connection {
+    /// Runs a `COPY ... FROM STDIN` statement and sends it everything `data` reads, such as a
+    /// CSV file. Returns the number of rows copied.
+    ///
+    /// The data must be in the format the statement names: text (tab separated, the default),
+    /// `csv` or `binary`. When reading `data` fails, the copy is called off and nothing of it is
+    /// stored.
+    ///
+    /// ```valk
+    /// let file = fs.stream("users.csv") ! panic("cannot open the file")
+    /// let count = con.copy_in("COPY users (name, email) FROM STDIN (FORMAT csv, HEADER)", file) ! panic("%{E.message}")
+    /// ```
+    + fn copy_in(statement: String, data: io.Reader) uint !Error {
+        this.start_copy(statement, 'G') !>
+        let buf = [u8]{ 0 x COPY_CHUNK }
+        while true {
+            let count = data.read(buf) ! {
+                if error_is(E.code, closed) : break
+                this.abort_copy("Reading the data to copy failed") !>
+                throw .error { message: "Reading the data to copy failed" }
+            }
+            if count == 0 : break
+            this.sender.write(buf.view(0, count))
+            this.write_message('d')
+            if this.packetbuf.length >= COPY_SEND : this.send() !>
+        }
+        return this.finish_copy_in() !>
+    }
+
+    /// Runs a `COPY ... TO STDOUT` statement and writes what the server sends to `out`, such
+    /// as a file. Returns the number of rows copied.
+    ///
+    /// ```valk
+    /// let file = fs.stream("users.csv", fs.OpenOptions { write: true, create: true, truncate: true }) ! panic("cannot open the file")
+    /// con.copy_out("COPY (SELECT name, email FROM users) TO STDOUT (FORMAT csv, HEADER)", file) ! panic("%{E.message}")
+    /// ```
+    + fn copy_out(statement: String, out: io.Writer) uint !Error {
+        this.start_copy(statement, 'H') !>
+        while true {
+            this.recv() !>
+            this.check_error() !>
+            let t = this.msg_type
+            if t == 'd' {
+                let data = this.reader.source
+                let failed = false
+                while data.length > 0 {
+                    let written = out.write(data) ! {
+                        failed = true
+                        break
+                    }
+                    if written == 0 {
+                        failed = true
+                        break
+                    }
+                    data = data.view(written, data.length - written)
+                }
+                if failed {
+                    // The server sends the rest anyway: read past it, so the connection stays usable
+                    this.reset_query_state()
+                    this.wait_ready() !>
+                    throw .error { message: "Writing the copied data failed" }
+                }
+                continue
+            }
+            if t == 'c' : continue
+            if t == 'C' {
+                this.read_command_complete()
+                continue
+            }
+            if t == 'Z' {
+                this.read_ready()
+                return this.affected_rows
+            }
+            this.unexpected() !>
+        }
+        return this.affected_rows
+    }
+
+    /// Inserts `rows` into `table` with one `COPY`, which is many times faster than an `INSERT`
+    /// per row. Every row holds the values of `columns` in that order; null stores NULL.
+    /// Returns the number of rows.
+    ///
+    /// The table and column names are quoted as given, so they must match exactly: the
+    /// lower case form of a name that was not quoted when the table was made. A name with a
+    /// schema is written `schema.table`.
+    ///
+    /// ```valk
+    /// con.copy_rows("users", .{ "name", "age" }, .{ .{ "Ada", 36 }, .{ "Bob", null } }) ! panic("%{E.message}")
+    /// ```
+    + fn copy_rows(table: String, columns: Array[String], rows: Array[Array[?Value]]) uint !Error {
+        let statement = ByteBuffer.new(64)
+        statement.write("COPY ")
+        each table.split(".") as part, i {
+            if i > 0 : statement.write_byte('.')
+            write_identifier(statement, part)
+        }
+        statement.write(" (")
+        each columns as column, i {
+            if i > 0 : statement.write(", ")
+            write_identifier(statement, column)
+        }
+        statement.write(") FROM STDIN")
+        this.start_copy(statement.to_string(), 'G') !>
+
+        let s = this.sender
+        each rows as row, index {
+            if row.length != columns.length {
+                s.clear()
+                this.abort_copy("A row has the wrong number of values") !>
+                throw .error { message: "Row %{index} has %{row.length} values for %{columns.length} columns" }
+            }
+            each row as value, i {
+                if i > 0 : s.write_byte('\t')
+                write_copy_value(s, value)
+            }
+            s.write_byte('\n')
+            if s.length >= COPY_CHUNK {
+                this.write_message('d')
+                if this.packetbuf.length >= COPY_SEND : this.send() !>
+            }
+        }
+        if s.length > 0 : this.write_message('d')
+        return this.finish_copy_in() !>
+    }
+
+    // Sends the statement and reads up to the answer that starts the copy: 'G' for data going
+    // in, 'H' for data coming out
+    fn start_copy(statement: String, expected: u8) !Error {
+        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.in_progress : this.stop_query()
+        this.start_statement()
+        if this.debug : println("Copy: " + statement)
+        this.send_simple(statement) !>
+        while true {
+            this.recv() !>
+            this.check_error() !>
+            let t = this.msg_type
+            if t == expected : return
+            let wanted = expected == 'G' ? "COPY ... FROM STDIN" : "COPY ... TO STDOUT"
+            if t == 'G' {
+                this.abort_copy("The copy goes the other way") !>
+                throw .error { message: "This statement copies data in; it needs " + wanted }
+            }
+            if t == 'H' || t == 'C' || t == 'T' || t == 'I' {
+                this.reset_query_state()
+                this.wait_ready() !>
+                throw .error { message: "The statement is not " + wanted }
+            }
+            this.unexpected() !>
+        }
+    }
+
+    fn finish_copy_in() uint !Error {
+        // CopyDone
+        this.write_message('c')
+        this.send() !>
+        while true {
+            this.recv() !>
+            this.check_error() !>
+            let t = this.msg_type
+            if t == 'C' {
+                this.read_command_complete()
+                continue
+            }
+            if t == 'Z' {
+                this.read_ready()
+                return this.affected_rows
+            }
+            this.unexpected() !>
+        }
+        return this.affected_rows
+    }
+
+    // CopyFail: the server drops what it received, answers with an error, then ReadyForQuery
+    fn abort_copy(reason: String) !Error {
+        let s = this.sender
+        s.clear()
+        s.write(reason)
+        s.write_byte(0)
+        this.write_message('f')
+        this.send() !>
+        this.reset_query_state()
+        this.wait_ready() !>
+    }
+}
+
+fn write_identifier(out: ByteBuffer, name: String) {
+    out.write_byte('"')
+    out.write(name.replace("\"", "\"\""))
+    out.write_byte('"')
+}
+
+// A value in the text format of COPY: `\N` for NULL, and backslash, tab and line breaks escaped
+fn write_copy_value(out: ByteBuffer, value: ?Value) {
+    if !isset(value) {
+        out.write("\\N")
+        return
+    }
+    let type = value.type
+    if type == TYPE.null {
+        out.write("\\N")
+        return
+    }
+    if type == TYPE.int {
+        out.write_int_ascii(value.int_value)
+        return
+    }
+    if type == TYPE.float {
+        out.write_f64_ascii_shortest(value.float_value.to(f64))
+        return
+    }
+    if type == TYPE.bool {
+        out.write(value.bool_value ? "t" : "f")
+        return
+    }
+    each value.to_string() as ch {
+        if ch == '\\' : out.write("\\\\")
+        else if ch == '\t' : out.write("\\t")
+        else if ch == '\n' : out.write("\\n")
+        else if ch == '\r' : out.write("\\r")
+        else : out.write_byte(ch)
+    }
+}

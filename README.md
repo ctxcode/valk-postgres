@@ -85,6 +85,26 @@ while true {
 Notifications that arrive while other queries run are kept in `db.notifications` until
 `wait_notification` hands them out.
 
+## Bulk import and export
+
+`COPY` moves many rows at once, far faster than an `INSERT` per row:
+
+```rust
+// Rows of values; null stores NULL
+db.copy_rows("users", .{ "name", "age" }, .{ .{ "Ada", 36 }, .{ "Bob", null } }) ! panic("%{E.message}")
+
+// A CSV file straight into a table
+let file = fs.stream("users.csv") ! panic("cannot open the file")
+db.copy_in("COPY users (name, age) FROM STDIN (FORMAT csv, HEADER)", file) ! panic("%{E.message}")
+
+// A query out to any writer
+let out = ByteBuffer.new()
+db.copy_out("COPY (SELECT name, age FROM users) TO STDOUT (FORMAT csv, HEADER)", out) ! panic("%{E.message}")
+```
+
+Each returns the number of rows. When a row is malformed or reading the input fails, the copy is
+called off and none of its rows are kept.
+
 ## With valk-sql
 
 `postgres.database(con)` turns a connection into a `sql.Db` of the

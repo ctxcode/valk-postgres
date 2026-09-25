@@ -1,0 +1,64 @@
+use postgres
+use valk.io
+
+// A writer that fails on its first write
+class FailingWriter is io.Writer {
+    + fn write(data: local &[u8]) uint !io.IoError {
+        throw .write
+    }
+}
+
+test "COPY in and out" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    defer con.close()
+    con.query("DROP TABLE IF EXISTS copy_people") ! { println(E.message) assert(false) return }
+    con.query("CREATE TABLE copy_people (name text, age int, note text)") ! { println(E.message) assert(false) return }
+
+    // Rows of values, with the characters the text format escapes
+    let count = con.copy_rows("copy_people", .{ "name", "age", "note" }, .{
+            .{ "Ada", 36, "tab\there" }
+            .{ "Bob", null, "line\nbreak \\ backslash" }
+    }) ! { println(E.message) assert(false) return }
+    assert(count == 2)
+    con.query("SELECT note FROM copy_people WHERE name = 'Bob'") ! { println(E.message) assert(false) return }
+    let bob = con.fetch_one() ! { println(E.message) assert(false) return }
+    assert(isset(bob) && (bob.get("note") !? postgres.Value.null()).to_string() == "line\nbreak \\ backslash")
+    con.query("SELECT count(*) AS n FROM copy_people WHERE age IS NULL") ! { assert(false) return }
+    let nulls = con.fetch_one() ! { assert(false) return }
+    assert(isset(nulls) && (nulls.get("n") !? postgres.Value.null()).to_int() == 1)
+
+    // CSV from a reader
+    let csv = ByteReader.new("name,age,note\nCy,7,\"quoted, comma\"\nDi,8,\n")
+    let loaded = con.copy_in("COPY copy_people (name, age, note) FROM STDIN (FORMAT csv, HEADER)", csv) ! { println(E.message) assert(false) return }
+    assert(loaded == 2)
+
+    // Out to a writer
+    let out = ByteBuffer.new()
+    let written = con.copy_out("COPY (SELECT name, age FROM copy_people ORDER BY name) TO STDOUT (FORMAT csv)", out) ! { println(E.message) assert(false) return }
+    assert(written == 4)
+    assert(out.to_string() == "Ada,36\nBob,\nCy,7\nDi,8\n")
+
+    // A row of the wrong size calls the copy off, and nothing of it is kept
+    let refused = ""
+    con.copy_rows("copy_people", .{ "name", "age" }, .{ .{ "Ed", 1 }, .{ "Fay" } }) ! { refused = E.message }
+    assert(refused == "Row 1 has 1 values for 2 columns")
+    con.query("SELECT count(*) AS n FROM copy_people") ! { println(E.message) assert(false) return }
+    let total = con.fetch_one() ! { assert(false) return }
+    assert(isset(total) && (total.get("n") !? postgres.Value.null()).to_int() == 4)
+
+    // A failing writer, a statement that copies the other way, and a server error: the
+    // connection stays usable after each
+    let broken = ""
+    con.copy_out("COPY copy_people TO STDOUT", FailingWriter {}) ! { broken = E.message }
+    assert(broken == "Writing the copied data failed")
+    let wrong_way = ""
+    con.copy_out("COPY copy_people FROM STDIN", FailingWriter {}) ! { wrong_way = E.message }
+    assert(wrong_way == "This statement copies data in; it needs COPY ... TO STDOUT")
+    let bad_data = false
+    con.copy_in("COPY copy_people (age) FROM STDIN", ByteReader.new("not a number\n")) ! { bad_data = error_is(E.code, error) }
+    assert(bad_data)
+    con.query("SELECT 1 AS one") ! { println(E.message) assert(false) return }
+    let one = con.fetch_one() ! { assert(false) return }
+    assert(isset(one))
+    con.query("DROP TABLE copy_people") ! { assert(false) return }
+}
