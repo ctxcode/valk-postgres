@@ -68,6 +68,23 @@ Notes:
 - Single statement queries are prepared and cached. From their second run, integers, floats, bools, dates and timestamps arrive in binary form, which is faster; the values you see are the same.
 - SSL: pass `postgres.SslMode.disable`, `prefer` (default), `require` or `verify_full` as the last argument of `connect`. `connect_with` takes a `postgres.SslOptions` instead, which adds a CA file for the server certificate and a client certificate for servers that ask for one.
 
+## Notifications
+
+A connection that ran `LISTEN channel` collects what other sessions send with `NOTIFY`, and
+`wait_notification` waits for the next one. It returns null when none arrives within the timeout
+(0 waits forever), and inside a coroutine only that coroutine waits:
+
+```rust
+db.query("LISTEN jobs") ! panic("%{E.message}")
+while true {
+    let job = db.wait_notification(30_000) ! panic("%{E.message}")
+    if isset(job) : println("new job: " + job.payload)
+}
+```
+
+Notifications that arrive while other queries run are kept in `db.notifications` until
+`wait_notification` hands them out.
+
 ## With valk-sql
 
 `postgres.database(con)` turns a connection into a `sql.Db` of the

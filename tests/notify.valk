@@ -1,0 +1,40 @@
+use postgres
+use valk.time
+
+fn notify_later(channel: String, payload: String, delay_ms: uint) {
+    time.sleep_ms(delay_ms)
+    let sender = connect() ! { println(E.message) return }
+    sender.query("NOTIFY " + channel + ", '" + payload + "'") ! { println(E.message) }
+    sender.close()
+}
+
+test "Waiting for a notification" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    defer con.close()
+    con.query("LISTEN valk_wait") ! { println(E.message) assert(false) return }
+
+    // Sent by another connection while this one waits; only this coroutine waits
+    let sending = co notify_later("valk_wait", "job-1", 50)
+    let started = time.mono_ms()
+    let got = con.wait_notification(5000) ! { println(E.message) assert(false) return }
+    await sending
+    assert(isset(got) && got.channel == "valk_wait" && got.payload == "job-1")
+    assert(time.mono_ms() - started < 4000)
+
+    // Nothing arrives: null after the timeout
+    started = time.mono_ms()
+    let none = con.wait_notification(100) ! { println(E.message) assert(false) return }
+    assert(!isset(none))
+    assert(time.mono_ms() - started >= 100)
+
+    // One that arrived during another query is handed out at once
+    let sender = connect() ! { println(E.message) assert(false) return }
+    sender.query("NOTIFY valk_wait, 'job-2'") ! { println(E.message) assert(false) return }
+    sender.close()
+    con.query("SELECT 1") ! { println(E.message) assert(false) return }
+    let queued = con.wait_notification(0) ! { println(E.message) assert(false) return }
+    assert(isset(queued) && queued.payload == "job-2")
+
+    // The connection takes queries again afterwards
+    con.query("SELECT 2 AS two") ! { println(E.message) assert(false) return }
+}

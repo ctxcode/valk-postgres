@@ -232,25 +232,117 @@ value RECV_CHUNK (65536)
                 println("------")
             }
 
-            // Asynchronous messages
-            if type == 'N' {
-                this.read_notice()
-                continue
-            }
-            if type == 'S' {
-                let name = r.read_cstring()
-                let value = r.read_cstring()
-                this.parameters.set(name, value)
-                continue
-            }
-            if type == 'A' {
-                let pid = r.read_u32_be()
-                let channel = r.read_cstring()
-                let payload = r.read_cstring()
-                this.notifications.append(Notification { process_id: pid, channel: channel, payload: payload })
-                continue
-            }
+            if this.handle_async(type) : continue
             return
+        }
+    }
+
+    // Handles a message the server may send at any time: a notice, a parameter change or a
+    // notification. Returns false for any other message.
+    fn handle_async(type: u8) bool {
+        let r = this.reader
+        if type == 'N' {
+            this.read_notice()
+            return true
+        }
+        if type == 'S' {
+            let name = r.read_cstring()
+            let value = r.read_cstring()
+            this.parameters.set(name, value)
+            return true
+        }
+        if type == 'A' {
+            let pid = r.read_u32_be()
+            let channel = r.read_cstring()
+            let payload = r.read_cstring()
+            this.notifications.append(Notification { process_id: pid, channel: channel, payload: payload })
+            return true
+        }
+        return false
+    }
+
+    /// Waits for a notification on a channel this connection listens to (`LISTEN name`) and
+    /// returns the oldest one, or null when none arrives within `timeout_ms`; 0 waits forever.
+    ///
+    /// One that already arrived during another query is returned at once. The connection must
+    /// be idle: not in the middle of reading the rows of a query. Inside a coroutine only the
+    /// coroutine waits.
+    ///
+    /// ```valk
+    /// con.query("LISTEN jobs") ! panic("%{E.message}")
+    /// while true {
+    ///     let job = con.wait_notification(30_000) ! break
+    ///     if isset(job) : println("new job: " + job.payload)
+    /// }
+    /// ```
+    + fn wait_notification(timeout_ms: uint (0)) ?Notification !Error {
+        if this.notifications.length > 0 : return this.notifications.pop_first() !? null
+        if this.in_progress || this.fetching : throw .protocol { message: "Read the rows of the query before waiting for a notification" }
+        if this.closed : throw .closed { message: "The connection is closed" }
+        let deadline = timeout_ms > 0 ? time.mono_ms() + timeout_ms : 0
+        let saved_timeout = this.con.read_timeout_ms
+        let got = this.wait_notification_until(deadline) ! {
+            this.con.read_timeout_ms = saved_timeout
+            throw E
+        }
+        this.con.read_timeout_ms = saved_timeout
+        return got
+    }
+
+    fn wait_notification_until(deadline: uint) ?Notification !Error {
+        while true {
+            this.read_idle_messages() !>
+            if this.notifications.length > 0 : return this.notifications.pop_first() !? null
+            let remaining: uint = 0
+            if deadline > 0 {
+                let now = time.mono_ms()
+                if now >= deadline : return null
+                remaining = deadline - now
+            }
+            this.con.read_timeout_ms = remaining
+            let buf = this.data_in
+            let offset = this.read_offset
+            if offset > 0 {
+                buf.clear_until(offset)
+                this.read_offset = 0
+            }
+            buf.reserve(RECV_CHUNK)
+            let count = this.con.read(buf.view_spare(RECV_CHUNK)) ! {
+                if error_is(E.code, timeout) : return null
+                this.closed = true
+                if error_is(E.code, closed) : throw .closed { message: "The server closed the connection" }
+                throw .error { message: "Failed to read bytes from the socket" }
+            }
+            if count == 0 {
+                this.closed = true
+                throw .closed { message: "The server closed the connection" }
+            }
+            buf.skip(count)
+        }
+        return null
+    }
+
+    // Handles the complete messages already read on an idle connection, where the server only
+    // sends asynchronous ones, or an error before it closes the connection
+    fn read_idle_messages() !Error {
+        let buf = this.data_in
+        let r = this.reader
+        while true {
+            let offset = this.read_offset
+            if buf.length - offset < 5 : return
+            r.reset()
+            r.source = buf.view(offset, 5)
+            let type = r.read_byte()
+            let len: uint = r.read_u32_be()
+            if len < 4 : throw .protocol { message: "Invalid message length received from the server" }
+            if buf.length - offset < len + 1 : return
+            r.reset()
+            r.source = buf.view(offset + 5, len - 4)
+            this.read_offset = offset + 1 + len
+            this.msg_type = type
+            if this.handle_async(type) : continue
+            this.check_error(false) !>
+            this.unexpected() !>
         }
     }
 
