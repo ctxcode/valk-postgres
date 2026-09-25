@@ -117,8 +117,8 @@ use sql
 use postgres
 
 let db = postgres.database(postgres.connect("127.0.0.1", "user", "password", "app") ! panic("%{E.message}"))
-db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! panic("%{E.message}")
-let rows = db.all("SELECT * FROM users WHERE age > ?", .{ sql.Value.of_int(18) }) ! panic("%{E.message}")
+db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada", "age" => 36 }) ! panic("%{E.message}")
+let rows = db.all("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
 ```
 
 The connection itself keeps working as before: the wrapper is a view of it, and the driver's own

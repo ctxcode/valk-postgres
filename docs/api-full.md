@@ -99,7 +99,7 @@ use sql
 use postgres
 
 let db = postgres.database(postgres.connect("127.0.0.1", "user", "password", "app") ! panic("%{E.message}"))
-db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic("%{E.message}")
+db.exec("INSERT INTO users (name) VALUES (:name)", .{ "name" => "Ada" }) ! panic("%{E.message}")
 ```
 
 ## Classes for 'main'

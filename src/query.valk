@@ -37,18 +37,7 @@ extend Connection {
     /// running it again is cheaper. A query may also contain several statements separated
     /// by `;`; it is then sent as is and cannot have bound values.
     + fn query(q: String, binds: ?Map[?Value] (null)) !Error {
-        if this.closed : throw .closed { message: "The connection is closed" }
-        if this.in_progress : this.stop_query()
-        //
-        this.in_progress = true
-        this.query_serial++
-        this.affected_rows = 0
-        this.command_tag = ""
-        this.column_count = 0
-        this.column_names.clear()
-        this.column_types.clear()
-        this.column_formats.clear()
-        this.final_binds.clear()
+        this.begin_query() !>
 
         if isset(binds) {
             each binds as value, name {
@@ -65,7 +54,26 @@ extend Connection {
             }
             this.clear_binds()
         }
+        this.send_query(q) !>
+    }
 
+    // The state a new query starts from; the values of its `$1`, `$2`, ... go in `final_binds`
+    fn begin_query() !Error {
+        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.in_progress : this.stop_query()
+        this.in_progress = true
+        this.query_serial++
+        this.affected_rows = 0
+        this.command_tag = ""
+        this.column_count = 0
+        this.column_names.clear()
+        this.column_types.clear()
+        this.column_formats.clear()
+        this.final_binds.clear()
+    }
+
+    // Sends a query whose placeholders are `$1`, `$2`, ... with their values in `final_binds`
+    fn send_query(q: String) !Error {
         if this.debug : println("Run: " + q)
         if this.final_binds.length > 0 || is_single_statement(q) {
             this.send_extended(q) !>

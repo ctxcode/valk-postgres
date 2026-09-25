@@ -18,18 +18,18 @@ test "Through the sql package" {
         return
     }
 
-    // `?` placeholders are written for Postgres on the way out
-    let changed = db.exec("INSERT INTO sql_users (name, age, active) VALUES (?, ?, ?)", .{
-        sql.Value.of("Ada")
-        sql.Value.of_int(36)
-        sql.Value.of_bool(true)
+    // Values go in by name, and Postgres gets `$1`, `$2`, ... for them
+    let changed = db.exec("INSERT INTO sql_users (name, age, active) VALUES (:name, :age, :active)", .{
+        "name" => "Ada"
+        "age" => 36
+        "active" => true
     }) ! { println(E.message) assert(false) return }
     assert(changed == 1)
 
-    db.exec("INSERT INTO sql_users (name, age, active) VALUES (?, ?, ?)", .{
-        sql.Value.of("Bob")
-        sql.Value.of_int(20)
-        sql.Value.of_bool(false)
+    db.exec("INSERT INTO sql_users (name, age, active) VALUES (:name, :age, :active)", .{
+        "name" => "Bob"
+        "age" => 20
+        "active" => false
     }) ! { assert(false) return }
 
     let rows = db.all("SELECT * FROM sql_users ORDER BY id") ! { println(E.message) assert(false) return }
@@ -44,19 +44,23 @@ test "Through the sql package" {
     assert((first.get("avatar") !? sql.Value.of("x")).is_null())
 
     assert((db.value("SELECT count(*) FROM sql_users") ! { assert(false) return }).to_int() == 2)
-    let one = db.one("SELECT * FROM sql_users WHERE name = ?", .{ sql.Value.of("Bob") }) ! { assert(false) return }
+    let one = db.one("SELECT * FROM sql_users WHERE name = :name", .{ "name" => "Bob" }) ! { assert(false) return }
     assert(isset(one))
     if isset(one) : assert((one.get("age") !? sql.Value.null()).to_int() == 20)
-    assert(!isset(db.one("SELECT * FROM sql_users WHERE name = ?", .{ sql.Value.of("nobody") }) ! { assert(false) return }))
+    assert(!isset(db.one("SELECT * FROM sql_users WHERE name = :name", .{ "name" => "nobody" }) ! { assert(false) return }))
 
     // RETURNING is how an insert gives its id back here
-    let returned = db.all("INSERT INTO sql_users (name, age, active) VALUES (?, ?, ?) RETURNING id", .{
-        sql.Value.of("Cid")
-        sql.Value.of_int(44)
-        sql.Value.of_bool(true)
+    let returned = db.all("INSERT INTO sql_users (name, age, active) VALUES (:name, :age, :active) RETURNING id", .{
+        "name" => "Cid"
+        "age" => 44
+        "active" => true
     }) ! { println(E.message) assert(false) return }
     assert(returned.length == 1)
     assert(((returned.get(0) !? .{}).get("id") !? sql.Value.null()).to_int() > 0)
+
+    // A `?` of the statement's own, the JSON operator here, and a `::` cast stay as written
+    let has_key = db.value("SELECT '{\"a\": 1}'::jsonb ? :key", .{ "key" => "a" }) ! { println(E.message) assert(false) return }
+    assert(has_key.to_bool())
 
     // Errors arrive as sql errors, with the SQLSTATE kept
     db.exec("INSERT INTO sql_users (id, name) VALUES (1, 'clash')") ! {
@@ -79,18 +83,18 @@ test "The builder against Postgres" {
     db.exec("DROP TABLE IF EXISTS sql_posts") ! { assert(false) return }
     db.exec("CREATE TABLE sql_posts (id serial PRIMARY KEY, title text, views int, published boolean)") ! { assert(false) return }
 
-    db.insert_into("sql_posts").values(.{ "title" => sql.Value.of("first"), "views" => sql.Value.of_int(10), "published" => sql.Value.of_bool(true) }).run() ! {
+    db.insert_into("sql_posts").values(.{ "title" => "first", "views" => 10, "published" => true }).run() ! {
         println(E.message)
         assert(false)
         return
     }
-    db.insert_into("sql_posts").values(.{ "title" => sql.Value.of("second"), "views" => sql.Value.of_int(3), "published" => sql.Value.of_bool(false) }).run() ! { assert(false) return }
-    db.insert_into("sql_posts").values(.{ "title" => sql.Value.of("third"), "views" => sql.Value.of_int(30), "published" => sql.Value.of_bool(true) }).run() ! { assert(false) return }
+    db.insert_into("sql_posts").values(.{ "title" => "second", "views" => 3, "published" => false }).run() ! { assert(false) return }
+    db.insert_into("sql_posts").values(.{ "title" => "third", "views" => 30, "published" => true }).run() ! { assert(false) return }
 
     let query = db.select("title, views")
     query.from("sql_posts")
-    query.where("published = ?", .{ sql.Value.of_bool(true) })
-    query.where("views > ?", .{ sql.Value.of_int(5) })
+    query.where("published", true)
+    query.where("views", ">", 5)
     query.order_by("views DESC")
     let rows = query.all() ! { println(E.message) assert(false) return }
     assert(rows.length == 2)
@@ -99,13 +103,13 @@ test "The builder against Postgres" {
     let in_rows = db.select().from("sql_posts").where_in("title", .{ sql.Value.of("first"), sql.Value.of("second") }).all() ! { assert(false) return }
     assert(in_rows.length == 2)
 
-    let updated = db.update("sql_posts").set_expression("views", "views + ?", .{ sql.Value.of_int(1) }).where("published = ?", .{ sql.Value.of_bool(true) }).run() ! {
+    let updated = db.update("sql_posts").set_expression("views", "views + :step", .{ "step" => 1 }).where("published", true).run() ! {
         println(E.message)
         assert(false)
         return
     }
     assert(updated == 2)
-    let deleted = db.delete_from("sql_posts").where("views < ?", .{ sql.Value.of_int(5) }).run() ! { assert(false) return }
+    let deleted = db.delete_from("sql_posts").where("views", "<", 5).run() ! { assert(false) return }
     assert(deleted == 1)
 
     db.exec("DROP TABLE sql_posts") ! { assert(false) return }
@@ -141,7 +145,7 @@ test "Transactions and migrations on Postgres" {
     let ran = migrator.migrate() ! { println(E.message) assert(false) return }
     assert(ran.length == 2)
     assert((migrator.migrate() ! { assert(false) return }).length == 0)
-    db.exec("INSERT INTO sql_migrations_test (name) VALUES (?)", .{ sql.Value.of("x") }) ! { println(E.message) assert(false) return }
+    db.exec("INSERT INTO sql_migrations_test (name) VALUES (:name)", .{ "name" => "x" }) ! { println(E.message) assert(false) return }
 
     db.exec("DROP TABLE sql_tx") ! { assert(false) return }
     db.exec("DROP TABLE sql_migrations_test") ! { assert(false) return }
@@ -158,14 +162,14 @@ test "Conditions that mix AND and OR on Postgres" {
         return
     }
 
-    let rows = Array[Array[sql.Value]]{
-        .{ sql.Value.of("ada"),   sql.Value.of("admin"),  sql.Value.of_int(10),  sql.Value.of_bool(true) }
-        .{ sql.Value.of("bob"),   sql.Value.of("member"), sql.Value.of_int(150), sql.Value.of_bool(true) }
-        .{ sql.Value.of("dora"),  sql.Value.of("admin"),  sql.Value.of_int(30),  sql.Value.of_bool(false) }
-        .{ sql.Value.of("eve"),   sql.Value.of("owner"),  sql.Value.null(),      sql.Value.of_bool(true) }
+    let rows = Array[Map[sql.Value]]{
+        .{ "name" => "ada",  "role" => "admin",  "score" => 10,               "active" => true }
+        .{ "name" => "bob",  "role" => "member", "score" => 150,              "active" => true }
+        .{ "name" => "dora", "role" => "admin",  "score" => 30,               "active" => false }
+        .{ "name" => "eve",  "role" => "owner",  "score" => sql.Value.null(), "active" => true }
     }
     each rows as row {
-        db.exec("INSERT INTO sql_mixed (name, role, score, active) VALUES (?, ?, ?, ?)", row) ! {
+        db.exec("INSERT INTO sql_mixed (name, role, score, active) VALUES (:name, :role, :score, :active)", row) ! {
             println(E.message)
             assert(false)
             return
@@ -175,10 +179,10 @@ test "Conditions that mix AND and OR on Postgres" {
     // The placeholders are numbered $1, $2, ... in the order the conditions nest
     let found = db.select("name")
         .from("sql_mixed")
-        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where("active", true)
         .where_group(fn(w: sql.Conditions) {
-            w.where("role = ?", .{ sql.Value.of("admin") })
-            w.or_where("score > ?", .{ sql.Value.of_int(100) })
+            w.where("role", "admin")
+            w.or_where("score", ">", 100)
         })
         .order_by("name")
         .all() ! { println(E.message) assert(false) return }
@@ -189,9 +193,9 @@ test "Conditions that mix AND and OR on Postgres" {
     // A NULL score is found by the group that allows it
     let owners = db.select("name")
         .from("sql_mixed")
-        .where("role = ?", .{ sql.Value.of("owner") })
+        .where("role", "owner")
         .where_group(fn(w: sql.Conditions) {
-            w.where("score > ?", .{ sql.Value.of_int(4) })
+            w.where("score", ">", 4)
             w.or_where_null("score")
         })
         .all() ! { println(E.message) assert(false) return }
@@ -210,7 +214,7 @@ test "Chunking and rows taken over, on Postgres" {
         return
     }
     let i: uint = 0
-    while i++ < 120 : db.exec("INSERT INTO sql_chunks (name) VALUES (?)", .{ sql.Value.of("row " + i) }) ! { assert(false) return }
+    while i++ < 120 : db.exec("INSERT INTO sql_chunks (name) VALUES (:name)", .{ "name" => "row " + i }) ! { assert(false) return }
 
     // Pages, with the last one short
     let pages: Array[uint] = .{}
@@ -224,7 +228,7 @@ test "Chunking and rows taken over, on Postgres" {
     // Walking by id while writing to every row
     let updated = db.select().from("sql_chunks").chunk_by_id("id", 40, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
         each rows as row {
-            db.exec("UPDATE sql_chunks SET checked = true WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+            db.exec("UPDATE sql_chunks SET checked = true WHERE id = :id", .{ "id" => row.get("id") !? sql.Value.null() }) !>
         }
         return true
     }) ! { println(E.message) assert(false) return }

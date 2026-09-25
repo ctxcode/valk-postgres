@@ -14,7 +14,7 @@ use valk.crypto
 /// use postgres
 ///
 /// let db = postgres.database(postgres.connect("127.0.0.1", "user", "password", "app") ! panic("%{E.message}"))
-/// db.exec("INSERT INTO users (name) VALUES (?)", .{ sql.Value.of("Ada") }) ! panic("%{E.message}")
+/// db.exec("INSERT INTO users (name) VALUES (:name)", .{ "name" => "Ada" }) ! panic("%{E.message}")
 /// ```
 + fn database(con: Connection) sql.Db {
     return sql.Db.new(SqlDriver { con: con })
@@ -42,14 +42,15 @@ class SqlDriver is sql.Driver {
         return SqlRows { con: this.con, serial: this.con.query_serial }
     }
 
+    // valk-sql wrote the statement's placeholders as `$1`, `$2`, ... already, so the values go
+    // straight to them; the driver's own `?` rewriting would take a jsonb `?` for one
     fn run_statement(statement: String, args: Array[sql.Value]) !sql.Error {
         let con = this.con
         con.clear_binds()
-        each args as arg {
-            con.bindv(to_driver_value(arg))
-        }
         translate(statement, fn() !Error {
-            con.query(statement) !>
+            con.begin_query() !>
+            each args as arg : con.final_binds.append(to_driver_value(arg))
+            con.send_query(statement) !>
         }) !>
     }
 
