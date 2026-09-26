@@ -41,7 +41,7 @@ while db.fetch_row(user) ! panic("Error: %{E.message}") {
 }
 
 // Fetch all
-let users = db.fetch_all() ! { assert(false) return }
+let users = db.fetch_all() ! panic("Error: %{E.message}")
 
 // Fetch one
 db.query("INSERT INTO users (name) VALUES (:name) RETURNING id", .{ "name" => "new" }) ! panic("Error: %{E.message}")
@@ -65,7 +65,7 @@ Notes:
 - An array bound to `:name` expands into a list: `WHERE id IN (:ids)`.
 - `affected_rows` holds the row count of the last command. Use `RETURNING` for generated ids.
 - Server errors carry the SQLSTATE in `E.sqlstate`.
-- Single statement queries are prepared and cached. From their second run, integers, floats, bools, dates and timestamps arrive in binary form, which is faster; the values you see are the same.
+- Single statement queries are prepared and cached.
 - SSL: pass `postgres.SslMode.disable`, `prefer` (default), `require` or `verify_full` as the last argument of `connect`. `connect_with` takes a `postgres.SslOptions` instead, which adds a CA file for the server certificate and a client certificate for servers that ask for one.
 
 ## Notifications
@@ -121,8 +121,7 @@ db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada"
 let rows = db.all("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
 ```
 
-The connection itself keeps working as before: the wrapper is a view of it, and the driver's own
-API stays there for the paths where every allocation counts.
+The connection's own API stays available next to it.
 
 ## Development
 
