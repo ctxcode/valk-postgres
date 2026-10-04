@@ -9,6 +9,7 @@
 #   select_by_id  prepared statement with a parameter, one row read
 #   fetch_rows    every row of a 10k row table (20 rounds), 4 columns read
 #   insert        parameterized inserts inside one transaction
+# Valk also runs select_by_id and insert through an explicitly prepared statement.
 # Go and Rust are skipped when their toolchain is missing.
 set -e
 DIR=$(cd "$(dirname "$0")" && pwd)

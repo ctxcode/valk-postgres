@@ -68,6 +68,30 @@ Notes:
 - Single statement queries are prepared and cached.
 - SSL: pass `postgres.SslMode.disable`, `prefer` (default), `require` or `verify_full` as the last argument of `connect`. `connect_with` takes a `postgres.SslOptions` instead, which adds a CA file for the server certificate and a client certificate for servers that ask for one.
 
+## Prepared statements
+
+`prepare` parses and plans a statement on the server once; running it then only sends the values.
+Values go in by name, and the rows are read from the connection as after `query`:
+
+```rust
+let find = db.prepare("SELECT id, name FROM users WHERE age > :age") ! panic("%{E.message}")
+defer find.close()
+
+find.query(.{ "age" => 18 }) ! panic("%{E.message}")
+let users = db.fetch_all() ! panic("%{E.message}")
+
+let insert = db.prepare("INSERT INTO users (name) VALUES (:name)") ! panic("%{E.message}")
+let changed = insert.run(.{ "name" => "Ada" }) ! panic("%{E.message}")
+```
+
+A name used twice is one parameter, and every name needs a value. An array is sent as a Postgres
+array, so a list of ids goes in as `WHERE id = ANY(:ids)`. `close` releases the statement on the
+server; closing the connection releases them all.
+
+A query run with `db.query` is prepared and cached as well, so on a local server the difference
+is small: 26,300 against 26,800 selects by id per second, and 34,400 against 35,400 inserts
+(`./bench/run.sh`).
+
 ## Notifications
 
 A connection that ran `LISTEN channel` collects what other sessions send with `NOTIFY`, and

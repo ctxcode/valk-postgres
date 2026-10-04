@@ -1,0 +1,122 @@
+use postgres
+
+test "Prepared statements" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    defer con.close()
+    con.query("DROP TABLE IF EXISTS prepared_users") ! { assert(false) return }
+    con.query("CREATE TABLE prepared_users (id serial PRIMARY KEY, name text, age int, score float8, active bool)") ! { assert(false) return }
+
+    let insert = con.prepare("INSERT INTO prepared_users (name, age, score, active) VALUES (:name, :age, :score, :active) RETURNING id") ! { println(E.message) assert(false) return }
+    assert(insert.sql.starts_with("INSERT"))
+    let i: uint = 0
+    while i++ < 20 {
+        insert.query(.{ "name" => "user " + i, "age" => i, "score" => i.to(float) / 2, "active" => i % 2 == 0 }) ! { println(E.message) assert(false) return }
+        let row = con.fetch_one() ! { assert(false) return }
+        assert(isset(row))
+        if isset(row) : assert((row["id"] ?? postgres.Value.null()).to_int() == i.to(int))
+    }
+    // NULL values, and run returns the row count
+    let changed = insert.run(.{ "name" => null, "age" => 99, "score" => null, "active" => null }) ! { println(E.message) assert(false) return }
+    assert(changed == 1)
+
+    // A name used twice is one parameter; casts and quoted text stay
+    let find = con.prepare("SELECT id, name, score, active, 'x:y' AS q FROM prepared_users WHERE age >= :min AND age < :min::int + 3 ORDER BY id") ! { println(E.message) assert(false) return }
+    find.query(.{ "min" => 5 }) ! { println(E.message) assert(false) return }
+    let rows = con.fetch_all() ! { assert(false) return }
+    assert(rows.length == 3)
+    let first = rows.get(0) !? .{}
+    assert((first["name"] ?? postgres.Value.null()).to_string() == "user 5")
+    assert((first["score"] ?? postgres.Value.null()).to_float() == 2.5)
+    assert((first["active"] ?? postgres.Value.null()).to_bool() == false)
+    assert((first["q"] ?? postgres.Value.null()).to_string() == "x:y")
+    assert(con.affected_rows == 3)
+
+    // The allocation-free row API works on it too, and rows come in binary where they can
+    find.query(.{ "min" => 18 }) ! { assert(false) return }
+    let seen: uint = 0
+    while con.next_row() ! { assert(false) return } {
+        assert(con.col_int(0) >= 18)
+        seen++
+    }
+    assert(seen == 3)
+
+    // Stopping halfway and running another query is fine
+    find.query(.{ "min" => 1 }) ! { assert(false) return }
+    assert(con.next_row() ! { assert(false) return })
+    con.query("SELECT count(*) AS n FROM prepared_users") ! { assert(false) return }
+    let count = con.fetch_one() ! { assert(false) return }
+    assert(isset(count))
+    if isset(count) : assert((count["n"] ?? postgres.Value.null()).to_int() == 21)
+    assert((find.run(.{ "min" => 1 }) ! { assert(false) return }) == 3)
+
+    // Arrays go in as Postgres arrays
+    let any = con.prepare("SELECT count(*) AS n FROM prepared_users WHERE id = ANY(:ids)") ! { println(E.message) assert(false) return }
+    any.query(.{ "ids" => Array[int]{ 1, 2, 3, 99 } }) ! { println(E.message) assert(false) return }
+    let found = con.fetch_one() ! { assert(false) return }
+    assert(isset(found))
+    if isset(found) : assert((found["n"] ?? postgres.Value.null()).to_int() == 3)
+
+    // A missing value throws, and the connection stays usable
+    let missing = false
+    insert.run(.{ "name" => "x" }) ! {
+        missing = true
+    }
+    assert(missing)
+
+    // Server errors leave the statement usable
+    let unique = con.prepare("INSERT INTO prepared_users (id, name) VALUES (:id, :name)") ! { assert(false) return }
+    let clash = false
+    unique.run(.{ "id" => 1, "name" => "x" }) ! {
+        clash = E.sqlstate == "23505"
+    }
+    assert(clash)
+    assert((unique.run(.{ "id" => 1000, "name" => "y" }) ! { println(E.message) assert(false) return }) == 1)
+
+    // Inside a transaction
+    con.begin() ! { assert(false) return }
+    unique.run(.{ "id" => 1001, "name" => "z" }) ! { assert(false) return }
+    con.rollback() ! { assert(false) return }
+    assert((find.run(.{ "min" => 0 }) ! { assert(false) return }) == 2)
+
+    // Closed statements throw, and the server forgot them
+    insert.close()
+    let closed = false
+    insert.run(.{ "name" => "x", "age" => 1, "score" => 1, "active" => true }) ! {
+        closed = error_is(E.code, closed)
+    }
+    assert(closed)
+    insert.close()
+    con.query("SELECT count(*) AS n FROM pg_prepared_statements WHERE NOT from_sql AND name LIKE 'p%'") ! { assert(false) return }
+    let left = con.fetch_one() ! { assert(false) return }
+    assert(isset(left))
+    if isset(left) : assert((left["n"] ?? postgres.Value.null()).to_int() == 3)
+    find.close()
+    any.close()
+    unique.close()
+    con.query("DROP TABLE prepared_users") ! { assert(false) return }
+}
+
+test "Prepared statement errors" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    defer con.close()
+
+    let syntax = false
+    con.prepare("SELEC 1") ! {
+        syntax = E.sqlstate == "42601"
+    }
+    assert(syntax)
+
+    // Values only go in by name
+    let positional = false
+    con.prepare("SELECT $1::int") ! {
+        positional = true
+    }
+    assert(positional)
+
+    // The connection still works
+    let one = con.prepare("SELECT 1 AS v") ! { println(E.message) assert(false) return }
+    one.query() ! { assert(false) return }
+    let row = con.fetch_one() ! { assert(false) return }
+    assert(isset(row))
+    if isset(row) : assert((row["v"] ?? postgres.Value.null()).to_int() == 1)
+}

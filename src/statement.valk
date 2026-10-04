@@ -1,0 +1,217 @@
+/// A statement prepared once on the server and run as often as needed, made by
+/// `Connection.prepare`.
+///
+/// Its values go in by name, as with `Connection.query`, and its rows are read with the fetch
+/// methods of the connection. `close` releases it on the server; closing the connection
+/// releases them all.
+///
+/// ```valk
+/// let insert = con.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+/// defer insert.close()
+/// each people as person {
+///     insert.run(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+/// }
+/// ```
++ class Statement {
+    /// The SQL the statement was prepared from.
+    ~+ sql: String
+    con: Connection
+    name: String
+    // Per `$n`, the name its value is taken from
+    names: Array[String]
+    column_names: Array[String]
+    column_types: Array[uint]
+    ~ closed: bool (false)
+
+    /// Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are
+    /// read with `fetch_row`, `fetch_one`, `fetch_all` or `next_row` of the connection.
+    ///
+    /// Every placeholder needs a value; a name without one throws. An array is sent as a
+    /// Postgres array, for `id = ANY(:ids)`.
+    + fn query(values: ?Map[?Value] (null)) !Error {
+        this.con.query_prepared(this, values) !>
+    }
+
+    /// Runs the statement and returns how many rows it changed; for a `SELECT`, how many rows
+    /// it found.
+    + fn run(values: ?Map[?Value] (null)) uint !Error {
+        let con = this.con
+        con.query_prepared(this, values) !>
+        con.stop_query()
+        return con.affected_rows
+    }
+
+    /// Releases the statement on the server. Running it afterwards throws `closed`.
+    + fn close() {
+        if this.closed : return
+        this.closed = true
+        this.con.close_prepared(this.name) _
+    }
+}
+
+extend Connection {
+    prepared_counter: uint (0)
+
+    /// Prepares a statement on the server, to run many times with other values each time.
+    ///
+    /// The server parses and plans the SQL once, here; running the statement only sends its
+    /// values. Values go in by name, `:name`, and a name used twice takes the same value.
+    ///
+    /// ```valk
+    /// let find = con.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+    /// defer find.close()
+    /// find.query(.{ "id" => 1 }) ! panic("%{E.message}")
+    /// let user = con.fetch_one() ! panic("%{E.message}")
+    /// ```
+    + fn prepare(sql: String) Statement !Error {
+        this.begin_query() !>
+        let names = Array[String]{}
+        let text = number_names(sql, names)
+        this.prepared_counter++
+        let name = "p" + this.prepared_counter
+        if this.debug : println("Prepare: " + text)
+
+        let s = this.sender
+        // Parse, with the parameter types left to the server
+        s.write(name)
+        s.write_byte(0)
+        s.write(text)
+        s.write_byte(0)
+        s.write_u16_be(0)
+        this.write_message('P')
+        // Describe statement
+        s.write_byte('S')
+        s.write(name)
+        s.write_byte(0)
+        this.write_message('D')
+        this.write_message('S')
+        this.send() ! {
+            this.reset_query_state()
+            throw E
+        }
+
+        // ParseComplete
+        this.recv() !>
+        this.check_error() !>
+        if this.msg_type != '1' : this.unexpected() !>
+        let param_count = this.read_statement_description() !>
+        this.wait_ready() !>
+
+        let statement = Statement {
+            sql: sql
+            con: this
+            name: name
+            names: names
+            column_names: this.column_names.clone()
+            column_types: this.column_types.clone()
+        }
+        this.reset_query_state()
+        if param_count != names.length {
+            statement.close()
+            throw .error { message: "A prepared statement takes its values by name: use :name instead of $1 or ?" }
+        }
+        return statement
+    }
+
+    // Binds `values` to a prepared statement and runs it
+    fn query_prepared(statement: Statement, values: ?Map[?Value]) !Error {
+        if statement.closed : throw .closed { message: "The statement is closed" }
+        this.begin_query() !>
+        let binds = this.final_binds
+        each statement.names as name {
+            let given = values ?! {
+                this.reset_query_state()
+                throw .error { message: "No value for the placeholder ':" + name + "'" }
+            }
+            let value = given.get(name) ! {
+                this.reset_query_state()
+                throw .error { message: "No value for the placeholder ':" + name + "'" }
+            }
+            binds.append(value ?? Value.null())
+        }
+        this.column_names.append_many(statement.column_names)
+        this.column_types.append_many(statement.column_types)
+        this.column_count = statement.column_names.length
+        if this.debug : println("Run prepared: " + statement.sql)
+        this.write_bind_execute(statement.name, true)
+        this.send() ! {
+            this.reset_query_state()
+            throw E
+        }
+        this.read_bind_complete() !>
+    }
+
+    // Close statement + Sync
+    fn close_prepared(name: String) !Error {
+        if this.closed : return
+        if this.in_progress : this.stop_query()
+        let s = this.sender
+        s.write_byte('S')
+        s.write(name)
+        s.write_byte(0)
+        this.write_message('C')
+        this.write_message('S')
+        this.send() !>
+        this.recv() !>
+        this.check_error() !>
+        this.wait_ready() !>
+    }
+}
+
+// Turns the `:name` placeholders of `query` into `$1`, `$2`, ..., a name used twice into the
+// same number, and adds the names to `names` in the order of their numbers. Quoted text,
+// comments and `::` casts are left alone.
+fn number_names(query: String, names: Array[String]) String {
+    if !query.contains_byte(':') : return query
+    let out = ByteBuffer.new(query.length + 8)
+    let i: uint = 0
+    let len = query.length
+    while i < len {
+        let ch = query[i++]
+        if ch == '\'' || ch == '"' {
+            out.write_byte(ch)
+            while i < len {
+                let qch = query[i++]
+                out.write_byte(qch)
+                if qch == ch : break
+            }
+            continue
+        }
+        if ch == '$' {
+            let end = dollar_quote_end(query, i - 1)
+            if end > 0 {
+                out.write(query.view(i - 1, end - (i - 1)))
+                i = end
+                continue
+            }
+        } else if ch == '-' && i < len && query[i] == '-' {
+            out.write_byte(ch)
+            while i < len && query[i] != '\n' : out.write_byte(query[i++])
+            continue
+        } else if ch == '/' && i < len && query[i] == '*' {
+            let close = query.index_of("*/", i + 1) !? len
+            let end = close + 2 > len ? len : close + 2
+            out.write(query.view(i - 1, end - (i - 1)))
+            i = end
+            continue
+        } else if ch == ':' {
+            if i < len && query[i] == ':' {
+                out.write("::")
+                i++
+                continue
+            }
+            let start = i
+            if start < len && (query[start].is_alpha() || query[start] == '_') {
+                while i < len && (query[i].is_alpha_numeric() || query[i] == '_') : i++
+                let name = query.range(start, i - start)
+                let index = names.index_of(name) !? names.length
+                if index == names.length : names.append(name)
+                out.write_byte('$')
+                out.write_uint_ascii(index + 1)
+                continue
+            }
+        }
+        out.write_byte(ch)
+    }
+    return out.to_string()
+}

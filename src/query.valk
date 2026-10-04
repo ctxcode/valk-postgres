@@ -1,6 +1,6 @@
 use valk.time
 
-class Statement {
+class CachedStatement {
     name: String
     last_used: uint
     param_count: uint
@@ -23,7 +23,7 @@ extend Connection {
     ~ command_tag: String ("")
     fetching: bool (false)
     in_progress: bool (false)
-    statements: Map[Statement] (.{})
+    statements: Map[CachedStatement] (.{})
     statement_counter: uint (0)
     scratch_row: Map[Value] (.{})
     /// Number of prepared statements kept per connection. Single statement queries are
@@ -145,7 +145,7 @@ extend Connection {
         let cached = false
         let closing: uint = 0
 
-        let existing: ?Statement = this.statements.get(q) !? null
+        let existing: ?CachedStatement = this.statements.get(q) !? null
         if isset(existing) {
             name = existing.name
             existing.last_used = now
@@ -172,6 +172,37 @@ extend Connection {
             s.write_byte(0)
             this.write_message('D')
         }
+        this.write_bind_execute(name, cached)
+        this.send() !>
+
+        // Responses
+        while closing > 0 {
+            this.recv() !>
+            this.check_error() !>
+            if this.msg_type != '3' : this.unexpected() !>
+            closing--
+        }
+        if !cached {
+            // ParseComplete
+            this.recv() !>
+            this.check_error() !>
+            if this.msg_type != '1' : this.unexpected() !>
+            let param_count = this.read_statement_description() !>
+            this.statements.set(q, CachedStatement {
+                name: name
+                last_used: now
+                param_count: param_count
+                column_names: this.column_names.clone()
+                column_types: this.column_types.clone()
+            })
+        }
+        this.read_bind_complete() !>
+    }
+
+    // Queues Bind / Execute / Sync for statement `name`, with the values in `final_binds`.
+    // `described`: the column types are known, so the decodable ones are asked in binary.
+    fn write_bind_execute(name: String, described: bool) {
+        let s = this.sender
         // Bind to the unnamed portal
         let binds = this.final_binds
         s.write_byte(0)
@@ -185,7 +216,7 @@ extend Connection {
         // Result format codes: binary where the column type is known and decodable
         let formats = this.column_formats
         formats.clear()
-        if cached {
+        if described {
             s.write_u16_be(this.column_count.to(u16))
             each this.column_types as type {
                 let format: u8 = this.binary_capable(type) ? FORMAT_BINARY : FORMAT_TEXT
@@ -202,40 +233,22 @@ extend Connection {
         this.write_message('E')
         // Sync
         this.write_message('S')
-        this.send() !>
+    }
 
-        // Responses
-        while closing > 0 {
-            this.recv() !>
-            this.check_error() !>
-            if this.msg_type != '3' : this.unexpected() !>
-            closing--
-        }
-        if !cached {
-            // ParseComplete
-            this.recv() !>
-            this.check_error() !>
-            if this.msg_type != '1' : this.unexpected() !>
-            // ParameterDescription
-            this.recv() !>
-            this.check_error() !>
-            if this.msg_type != 't' : this.unexpected() !>
-            let param_count: uint = this.reader.read_u16_be()
-            // RowDescription or NoData
-            this.recv() !>
-            this.check_error() !>
-            if this.msg_type == 'T' : this.read_row_description()
-            else if this.msg_type != 'n' : this.unexpected() !>
-            //
-            this.statements.set(q, Statement {
-                name: name
-                last_used: now
-                param_count: param_count
-                column_names: this.column_names.clone()
-                column_types: this.column_types.clone()
-            })
-        }
-        // BindComplete
+    // ParameterDescription, then RowDescription or NoData; returns the parameter count
+    fn read_statement_description() uint !Error {
+        this.recv() !>
+        this.check_error() !>
+        if this.msg_type != 't' : this.unexpected() !>
+        let param_count: uint = this.reader.read_u16_be()
+        this.recv() !>
+        this.check_error() !>
+        if this.msg_type == 'T' : this.read_row_description()
+        else if this.msg_type != 'n' : this.unexpected() !>
+        return param_count
+    }
+
+    fn read_bind_complete() !Error {
         this.recv() !>
         this.check_error() !>
         if this.msg_type != '2' : this.unexpected() !>

@@ -53,6 +53,20 @@ fn main(args: Array[String]) {
     }
     report("select_by_id", n, start)
 
+    // 2b. The same through a prepared statement
+    let find = db.prepare("SELECT id, name, score FROM bench_users WHERE id = :id") !!
+    start = time.mono_us()
+    i = 0
+    while i < n {
+        find.query(.{ "id" => (i % ROWS) + 1 }) !!
+        while db.fetch_row(row) !! {
+            checksum += (row["score"] ?? 0).to_int().to(uint)
+        }
+        i++
+    }
+    report("select_by_id_prepared", n, start)
+    find.close()
+
     // 3. Fetch every row of the table
     start = time.mono_us()
     let fetched : uint = 0
@@ -93,6 +107,19 @@ fn main(args: Array[String]) {
     }
     db.commit() !!
     report("insert", n, start)
+
+    // 4b. The same through a prepared statement
+    let insert = db.prepare("INSERT INTO bench_users (name, score) VALUES (:name, :score)") !!
+    start = time.mono_us()
+    db.begin() !!
+    i = 0
+    while i < n {
+        insert.run(.{ "name" => "new" + i, "score" => i }) !!
+        i++
+    }
+    db.commit() !!
+    report("insert_prepared", n, start)
+    insert.close()
 
     if checksum == 0 : println("checksum: 0")
 }

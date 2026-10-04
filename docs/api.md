@@ -114,6 +114,8 @@ Namespaces: [main](#main)
     + fn in_transaction() bool
     // Reads the next row without building a map. Its columns are read with the `col_*` methods and stay valid until the next `next_row`, `fetch_row` or `query`. Returns false when there are no more rows.
     + fn next_row() bool !Error
+    // Prepares a statement on the server, to run many times with other values each time.
+    + fn prepare(sql: String) Statement !Error
     // Runs a query. Rows, if any, are read with `fetch_row`, `fetch_one` or `fetch_all`.
     + fn query(q: String, binds: ?Map[?Value] (null)) void !Error
     // Runs `ROLLBACK`.
@@ -154,6 +156,22 @@ Namespaces: [main](#main)
     + mode: SslMode
     // The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
     + private_key_file: ?String
+}
+```
+
+```js
+// A statement prepared once on the server and run as often as needed, made by `Connection.prepare`.
++ class Statement {
+    ~ closed: bool
+    // The SQL the statement was prepared from.
+    ~+ sql: String
+
+    // Releases the statement on the server. Running it afterwards throws `closed`.
+    + fn close() void
+    // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `next_row` of the connection.
+    + fn query(values: ?Map[?Value] (null)) void !Error
+    // Runs the statement and returns how many rows it changed; for a `SELECT`, how many rows it found.
+    + fn run(values: ?Map[?Value] (null)) uint !Error
 }
 ```
 

@@ -180,6 +180,8 @@ db.exec("INSERT INTO users (name) VALUES (:name)", .{ "name" => "Ada" }) ! panic
     + fn in_transaction() bool
     // Reads the next row without building a map. Its columns are read with the `col_*` methods and stay valid until the next `next_row`, `fetch_row` or `query`. Returns false when there are no more rows.
     + fn next_row() bool !Error
+    // Prepares a statement on the server, to run many times with other values each time.
+    + fn prepare(sql: String) Statement !Error
     // Runs a query. Rows, if any, are read with `fetch_row`, `fetch_one` or `fetch_all`.
     + fn query(q: String, binds: ?Map[?Value] (null)) void !Error
     // Runs `ROLLBACK`.
@@ -372,6 +374,20 @@ Reads the next row without building a map. Its columns are read with the `col_*`
 methods and stay valid until the next `next_row`, `fetch_row` or `query`. Returns
 false when there are no more rows.
 
+#### prepare
+
+Prepares a statement on the server, to run many times with other values each time.
+
+The server parses and plans the SQL once, here; running the statement only sends its
+values. Values go in by name, `:name`, and a name used twice takes the same value.
+
+```valk
+let find = con.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+defer find.close()
+find.query(.{ "id" => 1 }) ! panic("%{E.message}")
+let user = con.fetch_one() ! panic("%{E.message}")
+```
+
 #### query
 
 Runs a query. Rows, if any, are read with `fetch_row`, `fetch_one` or `fetch_all`.
@@ -483,6 +499,60 @@ How SSL is used. The default verifies the server certificate and its host name.
 #### private_key_file
 
 The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
+
+```js
+// A statement prepared once on the server and run as often as needed, made by `Connection.prepare`.
++ class Statement {
+    ~ closed: bool
+    // The SQL the statement was prepared from.
+    ~+ sql: String
+
+    // Releases the statement on the server. Running it afterwards throws `closed`.
+    + fn close() void
+    // Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are read with `fetch_row`, `fetch_one`, `fetch_all` or `next_row` of the connection.
+    + fn query(values: ?Map[?Value] (null)) void !Error
+    // Runs the statement and returns how many rows it changed; for a `SELECT`, how many rows it found.
+    + fn run(values: ?Map[?Value] (null)) uint !Error
+}
+```
+
+### Statement
+
+A statement prepared once on the server and run as often as needed, made by
+`Connection.prepare`.
+
+Its values go in by name, as with `Connection.query`, and its rows are read with the fetch
+methods of the connection. `close` releases it on the server; closing the connection
+releases them all.
+
+```valk
+let insert = con.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+defer insert.close()
+each people as person {
+    insert.run(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+}
+```
+
+#### sql
+
+The SQL the statement was prepared from.
+
+#### close
+
+Releases the statement on the server. Running it afterwards throws `closed`.
+
+#### query
+
+Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are
+read with `fetch_row`, `fetch_one`, `fetch_all` or `next_row` of the connection.
+
+Every placeholder needs a value; a name without one throws. An array is sent as a
+Postgres array, for `id = ANY(:ids)`.
+
+#### run
+
+Runs the statement and returns how many rows it changed; for a `SELECT`, how many rows
+it found.
 
 ```js
 // A value read from a result row or bound to a query.
