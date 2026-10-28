@@ -92,6 +92,24 @@ A query run with `db.query` is prepared and cached as well, so on a local server
 is small: 26,300 against 26,800 selects by id per second, and 34,400 against 35,400 inserts
 (`./bench/run.sh`).
 
+## Pipelining
+
+A `Pipeline` lets the coroutines of one thread share a connection: their prepared queries go out
+together and the results come back in order, without a round trip per query. Each query is its
+own transaction, so an error fails only that query. Results can be given back with `release`,
+which lets later queries reuse them.
+
+```rust
+let find = con.prepare("SELECT name FROM users WHERE id = :id") ! panic("%{E.message}")
+let pipeline = postgres.Pipeline.new(con) ! panic("%{E.message}")
+// From any number of coroutines on this thread:
+let result = pipeline.query(find, .{ "id" => 1 }) ! panic("%{E.message}")
+while result.next_row() {
+    println(result.col_string(0))
+}
+result.release()
+```
+
 ## Notifications
 
 A connection that ran `LISTEN channel` collects what other sessions send with `NOTIFY`, and
