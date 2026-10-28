@@ -180,9 +180,11 @@ use valk.sync
             if type == 'D' {
                 result.add_row(r.source)
             } else if type == 'C' {
+                // The row count is the last word of the command tag, as in `INSERT 0 1`
                 let tag = r.read_cstring()
-                let space = tag.last_index_of(" ") ! continue
-                result.set_affected(tag.range(space + 1, tag.length - space - 1).to_uint() !? 0)
+                let start = tag.length
+                while start > 0 && tag[start - 1] != ' ' : start--
+                result.set_affected(tag.range(start, tag.length - start).to_uint() !? 0)
             } else if type == 'E' {
                 result.failed = true
                 while true {
