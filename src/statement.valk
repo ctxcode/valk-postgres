@@ -21,6 +21,8 @@
     names: Array[String]
     column_names: Array[String]
     column_types: Array[uint]
+    // Result formats per column, filled by the first `Pipeline.query`
+    result_formats: Array[u8] (.{})
     ~ closed: bool (false)
 
     /// Runs the statement with `values` bound to its `:name` placeholders. Rows, if any, are

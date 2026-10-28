@@ -1,0 +1,85 @@
+use postgres
+
+fn pipeline_lookup(pipeline: postgres.Pipeline, find: postgres.Statement, id: int) bool {
+    let result = pipeline.query(find, .{ "id" => id }) ! return false
+    if !result.next_row() : return false
+    let ok = result.col_int(0) == id && result.col_string(1) == "user " + id && result.col_int(2) == id * 10
+    return ok && !result.next_row()
+}
+
+test "Pipeline: queries of many coroutines share the connection and get their own rows" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    con.query("DROP TABLE IF EXISTS pipeline_users") ! { assert(false) return }
+    con.query("CREATE TABLE pipeline_users (id int PRIMARY KEY, name text NOT NULL, score bigint)") ! { assert(false) return }
+    con.query("INSERT INTO pipeline_users SELECT i, 'user ' || i, i * 10 FROM generate_series(1, 200) i") ! { assert(false) return }
+    let find = con.prepare("SELECT id, name, score FROM pipeline_users WHERE id = :id") ! { println(E.message) assert(false) return }
+    let pipeline = postgres.Pipeline.new(con) ! { println(E.message) assert(false) return }
+
+    let running = Array[co(bool)]{}
+    each 1 .. 200 as id : running.append(co pipeline_lookup(pipeline, find, id.to(int)))
+    let wrong: uint = 0
+    each running as c {
+        let ok = await c
+        if !ok : wrong++
+    }
+    assert(wrong == 0)
+    assert(pipeline.waiting() == 0)
+
+    // No row
+    let none = pipeline.query(find, .{ "id" => 9999 }) ! { assert(false) return }
+    assert(!none.next_row())
+    assert(none.affected_rows == 0)
+    pipeline.close()
+}
+
+fn pipeline_insert(pipeline: postgres.Pipeline, insert: postgres.Statement, id: int) String {
+    let result = pipeline.query(insert, .{ "id" => id, "name" => "n" + id }) ! return E.sqlstate.length > 0 ? E.sqlstate : "failed"
+    if !result.next_row() : return "no row"
+    return result.col_int(0) == id ? "ok" : "wrong id"
+}
+
+test "Pipeline: an error fails its own query only" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    con.query("DROP TABLE IF EXISTS pipeline_items") ! { assert(false) return }
+    con.query("CREATE TABLE pipeline_items (id int PRIMARY KEY, name text)") ! { assert(false) return }
+    let insert = con.prepare("INSERT INTO pipeline_items (id, name) VALUES (:id, :name) RETURNING id") ! { println(E.message) assert(false) return }
+    let pipeline = postgres.Pipeline.new(con) ! { println(E.message) assert(false) return }
+
+    // The second insert of id 5 violates the primary key; the queries around it still succeed
+    let ids = Array[int]{ 1, 2, 5, 3, 5, 4 }
+    let running = Array[co(String)]{}
+    each ids as id : running.append(co pipeline_insert(pipeline, insert, id))
+    let outcomes = Array[String]{}
+    each running as c : outcomes.append(await c)
+    assert(outcomes.join(",") == "ok,ok,ok,ok,23505,ok")
+
+    // A plain run reports the changed rows
+    let update = con.prepare("UPDATE pipeline_items SET name = :name WHERE id <= :id") ! { println(E.message) assert(false) return }
+    let changed = pipeline.query(update, .{ "name" => "x", "id" => 3 }) ! { assert(false) return }
+    assert(changed.affected_rows == 3)
+
+    pipeline.close()
+    assert(pipeline.closed)
+    let after = false
+    pipeline.query(update, .{ "name" => "y", "id" => 1 }) ! { after = error_is(E.code, closed) }
+    assert(after)
+}
+
+test "Pipeline: released results are reused" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    let find = con.prepare("SELECT n, 'row ' || n FROM generate_series(1, :count::int) n") ! { println(E.message) assert(false) return }
+    let pipeline = postgres.Pipeline.new(con) ! { println(E.message) assert(false) return }
+    let first = pipeline.query(find, .{ "count" => 3 }) ! { assert(false) return }
+    let seen: uint = 0
+    while first.next_row() : seen++
+    assert(seen == 3)
+    first.release()
+    // The next query gets the same object back, with nothing of the old rows
+    let second = pipeline.query(find, .{ "count" => 2 }) ! { assert(false) return }
+    assert(second == first)
+    assert(second.next_row() && second.col_int(0) == 1 && second.col_string(1) == "row 1")
+    assert(second.next_row() && second.col_int(0) == 2)
+    assert(!second.next_row())
+    second.release()
+    pipeline.close()
+}

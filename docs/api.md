@@ -144,6 +144,56 @@ Namespaces: [main](#main)
 ```
 
 ```js
+// Runs prepared statements for many coroutines of one thread over one connection, without waiting for each result before sending the next query.
++ class Pipeline {
+    // Whether the pipeline stopped working, after `close` or a connection failure.
+    ~ closed: bool
+    // Why the connection stopped working; every query after that throws `closed`.
+    ~ failure: String
+
+    // Stops the pipeline and closes its connection. Queries still waiting throw `closed`.
+    + fn close() void
+    // Takes over `con`, whose prepared statements stay usable through `query`.
+    + static fn new(con: Connection) Pipeline !Error
+    // Runs `statement` with `values` bound to its `:name` placeholders and returns its rows once they arrived. The calling coroutine waits; other coroutines keep running and may add their queries meanwhile.
+    + fn query(statement: Statement, values: ?Map[?Value] (null)) PipelineResult !Error
+    // The number of queries that were sent or queued and have no result yet.
+    + fn waiting() uint
+}
+```
+
+```js
+// The rows and outcome of one `Pipeline.query`. Rows are read with `next_row` and the `col_*` methods, like on a connection.
++ class PipelineResult {
+    // The number of rows the command changed, or a `SELECT` found.
+    ~ affected_rows: uint
+
+    // Returns whether column `index` arrived in binary; `col_view` then returns the raw value.
+    + fn col_binary(index: uint) bool
+    // Returns column `index` as a bool.
+    + fn col_bool(index: uint) bool
+    // Returns the number of columns.
+    + fn col_count() uint
+    // Returns column `index` as a float, 0 for NULL or text that is not a number.
+    + fn col_float(index: uint) float
+    // Returns column `index` as an integer, 0 for NULL or text that is not a number. A binary timestamp gives its microseconds since 2000-01-01 UTC.
+    + fn col_int(index: uint) int
+    // Returns whether column `index` is NULL.
+    + fn col_is_null(index: uint) bool
+    // Returns column `index` as a new string, "" for NULL.
+    + fn col_string(index: uint) String
+    // Returns the Postgres type OID of column `index`.
+    + fn col_type(index: uint) uint
+    // Returns the bytes of column `index` as a view, empty for NULL. It is valid while the result lives.
+    + fn col_view(index: uint) &[u8]
+    // Moves to the next row; false after the last one. Its columns are read with `col_*`.
+    + fn next_row() bool
+    // Gives the result back to its pipeline, which reuses it and its buffers for a later query. Optional: a result that is never released is freed like any other object. The result and every view of its columns must not be used afterwards.
+    + fn release() void
+}
+```
+
+```js
 // SSL settings for `connect_with`.
 + class SslOptions {
     // A PEM file with CA certificates to trust besides the system store, for a server certificate from a private CA. Only checked in `verify_full` mode.

@@ -1,0 +1,361 @@
+use valk.sync
+
+/// Runs prepared statements for many coroutines of one thread over one connection, without
+/// waiting for each result before sending the next query.
+///
+/// Queries that coroutines start while the previous batch is on its way go out together in
+/// one write, and the results come back in one stream, so a busy server makes far fewer
+/// round trips and system calls than with a connection per query. Each query is its own
+/// implicit transaction: an error fails that query only.
+///
+/// A pipeline belongs to the thread that made it; its connection must not be used directly
+/// any more.
+///
+/// ```valk
+/// let pipeline = postgres.Pipeline.new(con) ! panic("%{E.message}")
+/// let find = con.prepare("SELECT name FROM users WHERE id = :id") ! panic("%{E.message}")
+/// let result = pipeline.query(find, .{ "id" => 1 }) ! panic("%{E.message}")
+/// while result.next_row() : println(result.col_string(0))
+/// ```
++ class Pipeline {
+    con: Connection
+    // Queries in the order they were sent; their results arrive in this order
+    pending: Deque[PipelineResult] (.{})
+    // Messages queued since the last write, and the buffer being written
+    out: ByteBuffer (.new(4096))
+    spare: ByteBuffer (.new(4096))
+    write_waker: sync.Waker
+    read_waker: sync.Waker
+    // Results given back with `release`, reused by the next queries
+    idle_results: Array[PipelineResult] (.{})
+    /// Why the connection stopped working; every query after that throws `closed`.
+    ~ failure: String ("")
+    /// Whether the pipeline stopped working, after `close` or a connection failure.
+    ~ closed: bool (false)
+
+    /// Takes over `con`, whose prepared statements stay usable through `query`.
+    + static fn new(con: Connection) Pipeline !Error {
+        if con.closed : throw .closed { message: "The connection is closed" }
+        if con.in_progress : con.stop_query()
+        let pipeline = Pipeline {
+            con: con
+            write_waker: sync.Waker.new() ! throw .error { message: "Failed to create a waker" }
+            read_waker: sync.Waker.new() ! throw .error { message: "Failed to create a waker" }
+        }
+        co pipeline.write_loop()
+        co pipeline.read_loop()
+        return pipeline
+    }
+
+    /// The number of queries that were sent or queued and have no result yet.
+    + fn waiting() uint {
+        return this.pending.length
+    }
+
+    /// Runs `statement` with `values` bound to its `:name` placeholders and returns its rows
+    /// once they arrived. The calling coroutine waits; other coroutines keep running and may
+    /// add their queries meanwhile.
+    ///
+    /// Throws `error` with the SQLSTATE when the server rejects the query, and `closed` when
+    /// the connection failed.
+    + fn query(statement: Statement, values: ?Map[?Value] (null)) PipelineResult !Error {
+        if this.closed : throw .closed { message: "The pipeline is closed" + (this.failure.length > 0 ? ": " + this.failure : "") }
+        if statement.closed : throw .closed { message: "The statement is closed" }
+        let formats = this.result_formats(statement)
+        this.encode(statement, values) !>
+        let result = this.take_result(statement, formats) !>
+        this.pending.push_back(result)
+        this.write_waker.wake()
+        if this.pending.length == 1 : this.read_waker.wake()
+        while !result.done : result.waker.wait()
+        if result.failed {
+            let message = result.message
+            let sqlstate = result.sqlstate
+            let severity = result.severity
+            let detail = result.detail
+            let hint = result.hint
+            result.release()
+            if sqlstate.length == 0 : throw .closed { message: message }
+            throw .error { message: message, sqlstate: sqlstate, severity: severity, detail: detail, hint: hint }
+        }
+        return result
+    }
+
+    // A result object for a new query: a released one when there is one
+    fn take_result(statement: Statement, formats: Array[u8]) PipelineResult !Error {
+        let reused = this.idle_results.pop_last() !? null
+        if isset(reused) {
+            reused.reset(statement, formats)
+            return reused
+        }
+        let waker = sync.Waker.new() ! throw .error { message: "Failed to create a waker" }
+        return PipelineResult { pipeline: this, statement: statement, formats: formats, waker: waker }
+    }
+
+    /// Stops the pipeline and closes its connection. Queries still waiting throw `closed`.
+    + fn close() {
+        this.fail("The pipeline was closed")
+        this.con.close()
+    }
+
+    // Bind, Execute and Sync for the statement, after the messages already queued
+    fn encode(statement: Statement, values: ?Map[?Value]) !Error {
+        let con = this.con
+        let s = con.sender
+        s.clear()
+        // Unnamed portal, the statement, all parameters as text
+        s.write_byte(0)
+        s.write(statement.name)
+        s.write_byte(0)
+        s.write_u16_be(0)
+        s.write_u16_be(statement.names.length.to(u16))
+        each statement.names as name {
+            let given = values ?! {
+                s.clear()
+                throw .error { message: "No value for the placeholder ':" + name + "'" }
+            }
+            let value = given.get(name) ! {
+                s.clear()
+                throw .error { message: "No value for the placeholder ':" + name + "'" }
+            }
+            con.write_param(s, value ?? Value.null())
+        }
+        let formats = statement.result_formats
+        s.write_u16_be(formats.length.to(u16))
+        each formats as format : s.write_u16_be(format.to(u16))
+        let pb = con.packetbuf
+        pb.clear()
+        con.write_message('B')
+        s.write_byte(0)
+        s.write_u32_be(0)
+        con.write_message('E')
+        con.write_message('S')
+        this.out.write(pb)
+        pb.clear()
+    }
+
+    // Binary where the column type can be decoded, as `query` asks for
+    fn result_formats(statement: Statement) Array[u8] {
+        if statement.result_formats.length == statement.column_types.length : return statement.result_formats
+        let formats = statement.result_formats
+        formats.clear()
+        each statement.column_types as type {
+            formats.append(this.con.binary_capable(type) ? FORMAT_BINARY : FORMAT_TEXT)
+        }
+        return formats
+    }
+
+    // Writes everything that was queued since the last write, in one go
+    fn write_loop() {
+        while !this.closed {
+            if this.out.length == 0 {
+                this.write_waker.wait()
+                continue
+            }
+            let batch = this.out
+            this.out = this.spare
+            this.spare = batch
+            this.con.con.write(batch) ! {
+                this.fail("Failed to send bytes to the server")
+                return
+            }
+            batch.clear()
+        }
+    }
+
+    // Reads the results in order and hands each to the coroutine that waits for it
+    fn read_loop() {
+        let con = this.con
+        while !this.closed {
+            let result = this.pending.peek_front() ! {
+                this.read_waker.wait()
+                continue
+            }
+            con.recv() ! {
+                this.fail("Failed to read from the server")
+                return
+            }
+            let type = con.msg_type
+            let r = con.reader
+            if type == 'D' {
+                result.add_row(r.source)
+            } else if type == 'C' {
+                let tag = r.read_cstring()
+                let space = tag.last_index_of(" ") ! continue
+                result.set_affected(tag.range(space + 1, tag.length - space - 1).to_uint() !? 0)
+            } else if type == 'E' {
+                result.failed = true
+                while true {
+                    let field = r.read_byte()
+                    if field == 0 : break
+                    let value = r.read_cstring()
+                    if field == 'S' : result.severity = value
+                    else if field == 'C' : result.sqlstate = value
+                    else if field == 'M' : result.message = value
+                    else if field == 'D' : result.detail = value
+                    else if field == 'H' : result.hint = value
+                }
+            } else if type == 'Z' {
+                con.read_ready()
+                this.pending.pop_front() _
+                result.done = true
+                result.waker.wake()
+            }
+            // BindComplete, NoData, EmptyQueryResponse and PortalSuspended need nothing
+        }
+    }
+
+    // Ends every waiting query with `message`
+    fn fail(message: String) {
+        if this.closed : return
+        this.closed = true
+        this.failure = message
+        while true {
+            let result = this.pending.pop_front() ! break
+            result.failed = true
+            result.message = message
+            result.done = true
+            result.waker.wake()
+        }
+        this.write_waker.wake()
+        this.read_waker.wake()
+    }
+}
+
+/// The rows and outcome of one `Pipeline.query`. Rows are read with `next_row` and the
+/// `col_*` methods, like on a connection.
++ class PipelineResult {
+    pipeline: Pipeline
+    statement: Statement
+    formats: Array[u8]
+    waker: sync.Waker
+    // Every row: its length, then the DataRow payload
+    rows: ByteBuffer (.new(0))
+    read_pos: uint (0)
+    col_offsets: Array[uint] (.{})
+    col_lengths: Array[uint] (.{})
+    /// The number of rows the command changed, or a `SELECT` found.
+    ~ affected_rows: uint (0)
+    done: bool (false)
+    failed: bool (false)
+    message: String ("")
+    sqlstate: String ("")
+    severity: String ("")
+    detail: String ("")
+    hint: String ("")
+
+    /// Gives the result back to its pipeline, which reuses it and its buffers for a later
+    /// query. Optional: a result that is never released is freed like any other object. The
+    /// result and every view of its columns must not be used afterwards.
+    + fn release() {
+        if !this.done : return
+        this.rows.clear()
+        this.pipeline.idle_results.append(this)
+    }
+
+    fn reset(statement: Statement, formats: Array[u8]) {
+        this.statement = statement
+        this.formats = formats
+        this.rows.clear()
+        this.read_pos = 0
+        this.col_offsets.clear()
+        this.col_lengths.clear()
+        this.affected_rows = 0
+        this.done = false
+        this.failed = false
+        if this.message.length > 0 : this.message = ""
+        if this.sqlstate.length > 0 : this.sqlstate = ""
+        if this.severity.length > 0 : this.severity = ""
+        if this.detail.length > 0 : this.detail = ""
+        if this.hint.length > 0 : this.hint = ""
+    }
+
+    fn set_affected(rows: uint) {
+        this.affected_rows = rows
+    }
+
+    fn add_row(payload: &[u8]) {
+        this.rows.write_u32_be(payload.length.to(u32))
+        this.rows.write(payload)
+    }
+
+    /// Moves to the next row; false after the last one. Its columns are read with `col_*`.
+    + fn next_row() bool {
+        let rows = this.rows
+        let pos = this.read_pos
+        if pos + 4 > rows.length : return false
+        let data = rows.view(0, rows.length)
+        let len = be_uint(data.view(pos, 4), 4)
+        let start = pos + 4
+        this.read_pos = start + len
+        let offsets = this.col_offsets
+        let lengths = this.col_lengths
+        offsets.clear()
+        lengths.clear()
+        let count = be_uint(data.view(start, 2), 2)
+        let at = start + 2
+        let i: uint = 0
+        while i++ < count {
+            let col_len = be_uint(data.view(at, 4), 4)
+            at += 4
+            if col_len == u32.$max {
+                offsets.append(0)
+                lengths.append(uint.$max)
+                continue
+            }
+            offsets.append(at)
+            lengths.append(col_len)
+            at += col_len
+        }
+        return true
+    }
+
+    /// Returns the number of columns.
+    + fn col_count() uint {
+        return this.statement.column_types.length
+    }
+    /// Returns whether column `index` is NULL.
+    + fn col_is_null(index: uint) bool {
+        return (this.col_lengths.get(index) !? uint.$max) == uint.$max
+    }
+    /// Returns whether column `index` arrived in binary; `col_view` then returns the raw value.
+    + fn col_binary(index: uint) bool {
+        return (this.formats.get(index) !? FORMAT_TEXT) == FORMAT_BINARY
+    }
+    /// Returns the bytes of column `index` as a view, empty for NULL. It is valid while the
+    /// result lives.
+    + fn col_view(index: uint) &[u8] {
+        let len = this.col_lengths.get(index) !? uint.$max
+        if len == uint.$max : return this.rows.view(0, 0)
+        return this.rows.view(this.col_offsets.get(index) !? 0, len)
+    }
+    /// Returns column `index` as a new string, "" for NULL.
+    + fn col_string(index: uint) String {
+        if this.col_binary(index) && !this.col_is_null(index) : return binary_string(this.col_view(index), this.col_type(index))
+        return this.col_view(index).to_string()
+    }
+    /// Returns column `index` as an integer, 0 for NULL or text that is not a number. A
+    /// binary timestamp gives its microseconds since 2000-01-01 UTC.
+    + fn col_int(index: uint) int {
+        if this.col_binary(index) : return binary_int(this.col_view(index), this.col_type(index))
+        let v = this.col_view(index)
+        return v.to_int() ! return (v.to_float() !? 0).to(int)
+    }
+    /// Returns column `index` as a float, 0 for NULL or text that is not a number.
+    + fn col_float(index: uint) float {
+        if this.col_binary(index) : return binary_float(this.col_view(index), this.col_type(index))
+        return this.col_view(index).to_float() !? 0
+    }
+    /// Returns column `index` as a bool.
+    + fn col_bool(index: uint) bool {
+        if this.col_binary(index) : return binary_bool(this.col_view(index), this.col_type(index))
+        let v = this.col_view(index)
+        if v.length == 0 : return false
+        let c = v[0]
+        return c == 't' || c == 'T' || c == 'y' || c == 'Y' || (c >= '1' && c <= '9')
+    }
+    /// Returns the Postgres type OID of column `index`.
+    + fn col_type(index: uint) uint {
+        return this.statement.column_types.get(index) !? 0
+    }
+}
