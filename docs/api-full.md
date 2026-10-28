@@ -472,6 +472,8 @@ Process id of the backend that sent it.
     + static fn new(con: Connection) Pipeline !Error
     // Runs `statement` with `values` bound to its `:name` placeholders and returns its rows once they arrived. The calling coroutine waits; other coroutines keep running and may add their queries meanwhile.
     + fn query(statement: Statement, values: ?Map[?Value] (null)) PipelineResult !Error
+    // Starts a query of `statement` whose values follow with `arg`, in the order of its placeholders, and which `run` sends: `pipeline.start(find).arg(id).run()`.
+    + fn start(statement: Statement) PipelineQuery
     // The number of queries that were sent or queued and have no result yet.
     + fn waiting() uint
 }
@@ -522,9 +524,43 @@ add their queries meanwhile.
 Throws `error` with the SQLSTATE when the server rejects the query, and `closed` when
 the connection failed.
 
+#### start
+
+Starts a query of `statement` whose values follow with `arg`, in the order of its
+placeholders, and which `run` sends: `pipeline.start(find).arg(id).run()`.
+
+The same as `query` without a map, so nothing is allocated per value. Call `run` on
+it in the same expression; a started query that is never run is dropped.
+
 #### waiting
 
 The number of queries that were sent or queued and have no result yet.
+
+```js
+// A query of a prepared statement being built with `Pipeline.start`: add its values with `arg`, in the order of the placeholders, then send it with `run`.
++ class PipelineQuery {
+    // Adds the value of the next placeholder: an integer, float, bool, `String`, null for a nullable type, or anything `postgres.convert` takes. Returns the query, for chaining.
+    + fn arg(value: $T) PipelineQuery
+    // Sends the query and returns its rows once they arrived; see `Pipeline.query`.
+    + fn run() PipelineResult !Error
+}
+```
+
+### PipelineQuery
+
+A query of a prepared statement being built with `Pipeline.start`: add its values with
+`arg`, in the order of the placeholders, then send it with `run`.
+
+#### arg
+
+Adds the value of the next placeholder: an integer, float, bool, `String`, null for a
+nullable type, or anything `postgres.convert` takes. Returns the query, for chaining.
+
+#### run
+
+Sends the query and returns its rows once they arrived; see `Pipeline.query`.
+
+Throws `error` when the number of values does not match the placeholders.
 
 ```js
 // The rows and outcome of one `Pipeline.query`. Rows are read with `next_row` and the `col_*` methods, like on a connection.

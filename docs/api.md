@@ -157,8 +157,20 @@ Namespaces: [main](#main)
     + static fn new(con: Connection) Pipeline !Error
     // Runs `statement` with `values` bound to its `:name` placeholders and returns its rows once they arrived. The calling coroutine waits; other coroutines keep running and may add their queries meanwhile.
     + fn query(statement: Statement, values: ?Map[?Value] (null)) PipelineResult !Error
+    // Starts a query of `statement` whose values follow with `arg`, in the order of its placeholders, and which `run` sends: `pipeline.start(find).arg(id).run()`.
+    + fn start(statement: Statement) PipelineQuery
     // The number of queries that were sent or queued and have no result yet.
     + fn waiting() uint
+}
+```
+
+```js
+// A query of a prepared statement being built with `Pipeline.start`: add its values with `arg`, in the order of the placeholders, then send it with `run`.
++ class PipelineQuery {
+    // Adds the value of the next placeholder: an integer, float, bool, `String`, null for a nullable type, or anything `postgres.convert` takes. Returns the query, for chaining.
+    + fn arg(value: $T) PipelineQuery
+    // Sends the query and returns its rows once they arrived; see `Pipeline.query`.
+    + fn run() PipelineResult !Error
 }
 ```
 

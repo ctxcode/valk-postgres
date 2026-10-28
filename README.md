@@ -110,6 +110,12 @@ while result.next_row() {
 result.release()
 ```
 
+Values can also follow the placeholders in order, which needs no map:
+
+```rust
+let result = pipeline.start(find).arg(1).run() ! panic("%{E.message}")
+```
+
 ## Notifications
 
 A connection that ran `LISTEN channel` collects what other sessions send with `NOTIFY`, and

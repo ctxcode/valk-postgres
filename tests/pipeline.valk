@@ -83,3 +83,56 @@ test "Pipeline: released results are reused" {
     second.release()
     pipeline.close()
 }
+
+test "Pipeline: start takes values in order without a map" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    con.query("DROP TABLE IF EXISTS pipeline_args") ! { assert(false) return }
+    con.query("CREATE TABLE pipeline_args (id int PRIMARY KEY, name text, score float8, active bool, note text)") ! { assert(false) return }
+    let insert = con.prepare("INSERT INTO pipeline_args (id, name, score, active, note) VALUES (:id, :name, :score, :active, :note) RETURNING id") ! { println(E.message) assert(false) return }
+    let find = con.prepare("SELECT name, score, active, note FROM pipeline_args WHERE id = :id") ! { println(E.message) assert(false) return }
+    let pipeline = postgres.Pipeline.new(con) ! { println(E.message) assert(false) return }
+
+    let note: ?String = null
+    let made = pipeline.start(insert).arg(7).arg("seven").arg(3.5).arg(true).arg(note).run() ! { println(E.message) assert(false) return }
+    assert(made.next_row() && made.col_int(0) == 7)
+    made.release()
+
+    // The same row as the map form reads it
+    let by_pos = pipeline.start(find).arg(7).run() ! { assert(false) return }
+    let by_name = pipeline.query(find, .{ "id" => 7 }) ! { assert(false) return }
+    assert(by_pos.next_row() && by_name.next_row())
+    assert(by_pos.col_string(0) == "seven" && by_name.col_string(0) == "seven")
+    assert(by_pos.col_float(1) == 3.5 && by_pos.col_bool(2) && by_pos.col_is_null(3))
+
+    // A wrong number of values is an error, and the pipeline goes on
+    let wrong = false
+    pipeline.start(insert).arg(8).run() ! { wrong = error_is(E.code, error) && E.message.contains("takes 5 values, 1 given") }
+    assert(wrong)
+    let after = pipeline.start(find).arg(7).run() ! { assert(false) return }
+    assert(after.next_row())
+    pipeline.close()
+}
+
+fn pipeline_start_lookup(pipeline: postgres.Pipeline, find: postgres.Statement, id: int) bool {
+    let result = pipeline.start(find).arg(id).run() ! return false
+    let ok = result.next_row() && result.col_int(0) == id && result.col_string(1) == "user " + id
+    result.release()
+    return ok
+}
+
+test "Pipeline: queries started by many coroutines get their own rows" {
+    let con = connect() ! { println(E.message) assert(false) return }
+    con.query("DROP TABLE IF EXISTS pipeline_start_users") ! { assert(false) return }
+    con.query("CREATE TABLE pipeline_start_users (id int PRIMARY KEY, name text NOT NULL)") ! { assert(false) return }
+    con.query("INSERT INTO pipeline_start_users SELECT i, 'user ' || i FROM generate_series(1, 150) i") ! { assert(false) return }
+    let find = con.prepare("SELECT id, name FROM pipeline_start_users WHERE id = :id") ! { println(E.message) assert(false) return }
+    let pipeline = postgres.Pipeline.new(con) ! { println(E.message) assert(false) return }
+    let running = Array[co(bool)]{}
+    each 1 .. 150 as id : running.append(co pipeline_start_lookup(pipeline, find, id.to(int)))
+    let wrong: uint = 0
+    each running as c {
+        if !(await c) : wrong++
+    }
+    assert(wrong == 0)
+    pipeline.close()
+}

@@ -26,8 +26,9 @@ use valk.sync
     spare: ByteBuffer (.new(4096))
     write_waker: sync.Waker
     read_waker: sync.Waker
-    // Results given back with `release`, reused by the next queries
+    // Results given back with `release`, and queries built with `start`, reused
     idle_results: Array[PipelineResult] (.{})
+    idle_queries: Array[PipelineQuery] (.{})
     /// Why the connection stopped working; every query after that throws `closed`.
     ~ failure: String ("")
     /// Whether the pipeline stopped working, after `close` or a connection failure.
@@ -63,6 +64,32 @@ use valk.sync
         if statement.closed : throw .closed { message: "The statement is closed" }
         let formats = this.result_formats(statement)
         this.encode(statement, values) !>
+        return this.submit(statement, formats) !>
+    }
+
+    /// Starts a query of `statement` whose values follow with `arg`, in the order of its
+    /// placeholders, and which `run` sends: `pipeline.start(find).arg(id).run()`.
+    ///
+    /// The same as `query` without a map, so nothing is allocated per value. Call `run` on
+    /// it in the same expression; a started query that is never run is dropped.
+    + fn start(statement: Statement) PipelineQuery {
+        let reused = this.idle_queries.pop_last() !? null
+        let q = reused ?? PipelineQuery { pipeline: this, statement: statement }
+        q.statement = statement
+        q.count = 0
+        let payload = q.payload
+        payload.clear()
+        // Unnamed portal, the statement, all parameters as text
+        payload.write_byte(0)
+        payload.write(statement.name)
+        payload.write_byte(0)
+        payload.write_u16_be(0)
+        payload.write_u16_be(statement.names.length.to(u16))
+        return q
+    }
+
+    // Queues the result of the query whose messages were just added to `out`, and waits for it
+    fn submit(statement: Statement, formats: Array[u8]) PipelineResult !Error {
         let result = this.take_result(statement, formats) !>
         this.pending.push_back(result)
         this.write_waker.wake()
@@ -221,6 +248,81 @@ use valk.sync
         }
         this.write_waker.wake()
         this.read_waker.wake()
+    }
+}
+
+/// A query of a prepared statement being built with `Pipeline.start`: add its values with
+/// `arg`, in the order of the placeholders, then send it with `run`.
++ class PipelineQuery {
+    pipeline: Pipeline
+    statement: Statement
+    // The Bind message so far
+    payload: ByteBuffer (.new(128))
+    count: uint (0)
+
+    /// Adds the value of the next placeholder: an integer, float, bool, `String`, null for a
+    /// nullable type, or anything `postgres.convert` takes. Returns the query, for chaining.
+    + fn arg(value: $T) PipelineQuery {
+        let payload = this.payload
+        this.count++
+        #if T.$is_nullable
+        if !isset(value) {
+            payload.write_u32_be(u32.$max)
+            return this
+        }
+        #end
+        let data = value
+        #if T.$is_type_of(String)
+        payload.write_u32_be(data.length.to(u32))
+        payload.write(data)
+        #elif T.$is_bool
+        payload.write_u32_be(data ? 4 : 5)
+        payload.write(data ? "true" : "false")
+        #elif T.$is_integer || T.$is_float
+        let scratch = this.pipeline.con.querybuf
+        scratch.clear()
+        #if T.$is_integer
+        scratch.write_int_ascii(data.to(int))
+        #else
+        scratch.write_f64_ascii_shortest(data.to(f64))
+        #end
+        payload.write_u32_be(scratch.length.to(u32))
+        payload.write(scratch)
+        scratch.clear()
+        #else
+        this.pipeline.con.write_param(payload, convert(data))
+        #end
+        return this
+    }
+
+    /// Sends the query and returns its rows once they arrived; see `Pipeline.query`.
+    ///
+    /// Throws `error` when the number of values does not match the placeholders.
+    + fn run() PipelineResult !Error {
+        let pipeline = this.pipeline
+        let statement = this.statement
+        let count = this.count
+        pipeline.idle_queries.append(this)
+        if pipeline.closed : throw .closed { message: "The pipeline is closed" + (pipeline.failure.length > 0 ? ": " + pipeline.failure : "") }
+        if statement.closed : throw .closed { message: "The statement is closed" }
+        let expected = statement.names.length
+        if count != expected : throw .error { message: "The statement takes " + expected + " values, " + count + " given" }
+        let formats = pipeline.result_formats(statement)
+        let payload = this.payload
+        payload.write_u16_be(formats.length.to(u16))
+        each formats as format : payload.write_u16_be(format.to(u16))
+        let out = pipeline.out
+        out.write_byte('B')
+        out.write_u32_be((payload.length + 4).to(u32))
+        out.write(payload)
+        // Execute the unnamed portal, all rows, then Sync
+        out.write_byte('E')
+        out.write_u32_be(9)
+        out.write_byte(0)
+        out.write_u32_be(0)
+        out.write_byte('S')
+        out.write_u32_be(4)
+        return pipeline.submit(statement, formats) !>
     }
 }
 
