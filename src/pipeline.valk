@@ -75,7 +75,7 @@ use valk.sync
     + fn start(statement: Statement) PipelineQuery {
         let reused = this.idle_queries.pop_last() !? null
         let q = reused ?? PipelineQuery { pipeline: this, statement: statement }
-        q.statement = statement
+        if q.statement != statement : q.statement = statement
         q.count = 0
         let payload = q.payload
         payload.clear()
@@ -360,8 +360,9 @@ use valk.sync
     }
 
     fn reset(statement: Statement, formats: Array[u8]) {
-        this.statement = statement
-        this.formats = formats
+        // A replaced reference costs the collector a walk of what it held: keep the same ones
+        if this.statement != statement : this.statement = statement
+        if this.formats != formats : this.formats = formats
         this.rows.clear()
         this.read_pos = 0
         this.col_offsets.clear()
