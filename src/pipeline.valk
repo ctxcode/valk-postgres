@@ -207,11 +207,13 @@ use valk.sync
             if type == 'D' {
                 result.add_row(r.source)
             } else if type == 'C' {
-                // The row count is the last word of the command tag, as in `INSERT 0 1`
-                let tag = r.read_cstring()
-                let start = tag.length
-                while start > 0 && tag[start - 1] != ' ' : start--
-                result.set_affected(tag.range(start, tag.length - start).to_uint() !? 0)
+                // The row count is the last word of the command tag, as in `INSERT 0 1`;
+                // read in place, so no string is made per query
+                let tag = r.source
+                let end = tag.index_of_byte(0, r.pos) !? tag.length
+                let start = end
+                while start > r.pos && tag[start - 1] != ' ' : start--
+                result.set_affected(tag.view(start, end - start).to_uint() !? 0)
             } else if type == 'E' {
                 result.failed = true
                 while true {
