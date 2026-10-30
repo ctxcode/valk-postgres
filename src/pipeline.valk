@@ -397,22 +397,30 @@ use valk.sync
         this.read_pos = start + len
         let offsets = this.col_offsets
         let lengths = this.col_lengths
-        offsets.clear()
-        lengths.clear()
         let count = be_uint(data.view(start, 2), 2)
+        // Rows of a result have the same columns: the entries are overwritten in place
+        if offsets.length != count {
+            offsets.clear()
+            lengths.clear()
+            each 0 .. count {
+                offsets.append(0)
+                lengths.append(0)
+            }
+        }
         let at = start + 2
         let i: uint = 0
-        while i++ < count {
+        while i < count {
             let col_len = be_uint(data.view(at, 4), 4)
             at += 4
             if col_len == u32.$max {
-                offsets.append(0)
-                lengths.append(uint.$max)
-                continue
+                offsets.set(i, 0) _
+                lengths.set(i, uint.$max) _
+            } else {
+                offsets.set(i, at) _
+                lengths.set(i, col_len) _
+                at += col_len
             }
-            offsets.append(at)
-            lengths.append(col_len)
-            at += col_len
+            i++
         }
         return true
     }
