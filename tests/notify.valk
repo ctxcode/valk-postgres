@@ -1,4 +1,3 @@
-use postgres
 use valk.time
 
 fn notify_later(channel: String, payload: String, delay_ms: uint) {

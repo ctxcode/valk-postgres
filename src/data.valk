@@ -1,5 +1,5 @@
 // Debug helper: prints bytes as "0x..,0x.." without raw pointers
-fn print_bytes(data: &[u8]) {
+fn print_bytes(data: local &[u8]) {
     let len = data.length
     let i: uint = 0
     while i < len {

@@ -40,7 +40,7 @@ fn decode_field(field: &[u8], type: uint, binary: bool) Value {
 }
 
 // Big-endian unsigned integer from the first `bytes` bytes (0 when the field is too short)
-fn be_uint(field: &[u8], bytes: uint) uint {
+fn be_uint(field: local &[u8], bytes: uint) uint {
     if field.length < bytes : return 0
     let v: uint = 0
     let i: uint = 0

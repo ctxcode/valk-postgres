@@ -98,7 +98,7 @@ extend Connection {
 }
 
 // Converts the text of a column into a Value based on the column type
-fn convert_field(field: &[u8], type: uint) Value {
+fn convert_field(field: local &[u8], type: uint) Value {
     if type == OID_INT2 || type == OID_INT4 || type == OID_INT8 || type == OID_OID {
         let v = field.to_int() ! return field.to_string()
         return v

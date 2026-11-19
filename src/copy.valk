@@ -79,7 +79,6 @@ extend Connection {
             }
             this.unexpected() !>
         }
-        return this.affected_rows
     }
 
     /// Inserts `rows` into `table` with one `COPY`, which is many times faster than an `INSERT`
@@ -174,7 +173,6 @@ extend Connection {
             }
             this.unexpected() !>
         }
-        return this.affected_rows
     }
 
     // CopyFail: the server drops what it received, answers with an error, then ReadyForQuery

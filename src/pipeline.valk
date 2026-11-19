@@ -381,7 +381,7 @@ use valk.sync
         this.affected_rows = rows
     }
 
-    fn add_row(payload: &[u8]) {
+    fn add_row(payload: local &[u8]) {
         this.rows.write_u32_be(payload.length.to(u32))
         this.rows.write(payload)
     }
