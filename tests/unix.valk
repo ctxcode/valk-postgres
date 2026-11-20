@@ -1,0 +1,172 @@
+use postgres
+use valk.net
+use valk.fs
+use valk.io
+use valk.core
+
+#if OS != "win"
+fn pg_read_exact(peer: net.TcpConnection, buf: ByteBuffer, count: uint) bool {
+    let scratch = [u8]{ 0 x 512 }
+    while buf.length < count {
+        let n = peer.read(scratch) ! return false
+        if n == 0 : return false
+        buf.write(scratch.view(0, n))
+    }
+    return true
+}
+
+fn pg_write_msg(out: ByteBuffer, type: u8, payload: ByteBuffer) {
+    out.write_byte(type)
+    out.write_u32_be((payload.length + 4).to(u32))
+    out.write(payload)
+    payload.clear()
+}
+
+// Accepts one connection, verifies the StartupMessage, sends AuthOk + ParameterStatus + BackendKeyData + ReadyForQuery,
+// and returns the startup parameters sent by the client.
+fn pg_serve_one(server: atomic net.UnixServer) Map[String] {
+    let params = Map[String]{}
+    let peer = server.accept(2000) ! return params
+    defer peer.close() _
+
+    let buf = ByteBuffer.new()
+    if !pg_read_exact(peer, buf, 8) : return params
+    let r = ByteReader.new(buf)
+    let len: uint = r.read_u32_be()
+    let proto = r.read_u32_be()
+    if len < 8 || proto != 196608 : return params
+    if !pg_read_exact(peer, buf, len) : return params
+
+    r.reset()
+    r.source = buf.view(8, len - 8)
+    while r.remaining() > 0 {
+        let key = r.read_cstring()
+        if key.length == 0 : break
+        let val = r.read_cstring()
+        params.set(key, val)
+    }
+
+    let out = ByteBuffer.new()
+    let p = ByteBuffer.new()
+    // AuthenticationOk
+    p.write_u32_be(0)
+    pg_write_msg(out, 'R', p)
+    // ParameterStatus: server_version
+    p.write("server_version")
+    p.write_byte(0)
+    p.write("16.4-unix")
+    p.write_byte(0)
+    pg_write_msg(out, 'S', p)
+    // BackendKeyData
+    p.write_u32_be(4242)
+    p.write_u32_be(9999)
+    pg_write_msg(out, 'K', p)
+    // ReadyForQuery (idle)
+    p.write_byte('I')
+    pg_write_msg(out, 'Z', p)
+
+    io.write_all(peer, out) _
+    // Wait for Terminate ('X') or EOF so client close completes cleanly
+    let sink = [u8]{ 0 x 16 }
+    peer.read(sink) _
+    return params
+}
+
+test "Unix domain socket" {
+    let dir = fs.create_temp_dir("valk-pg-unix-") ! { assert(false) return }
+    defer fs.delete_all(dir) _
+
+    // 1. Direct socket path with connect_unix
+    let sock_path = fs.add(dir, "custom.sock")
+    let srv = net.unix_server(sock_path, true) ! { assert(false) return }
+    defer srv.close() _
+
+    let task = co fn() Map[String] {
+        return pg_serve_one(srv)
+    }()
+
+    let con = postgres.connect_unix(sock_path, "alice", "", "mydb") ! { println(E.message) assert(false) return }
+    assert(!con.ssl_enabled())
+    assert(con.server_version() == "16.4-unix")
+    assert(con.process_id == 4242)
+    assert(con.transaction_status == 'I')
+    con.close()
+
+    let params = await task
+    assert((params.get("user") !? "") == "alice")
+    assert((params.get("database") !? "") == "mydb")
+    assert((params.get("client_encoding") !? "") == "UTF8")
+
+    // 2. Direct socket path via connect() with default SslMode.prefer (skips SSL)
+    let task2 = co fn() Map[String] {
+        return pg_serve_one(srv)
+    }()
+
+    let con2 = postgres.connect(sock_path, "bob", "", "app") ! { println(E.message) assert(false) return }
+    assert(!con2.ssl_enabled())
+    assert(con2.server_version() == "16.4-unix")
+    con2.close()
+
+    let params2 = await task2
+    assert((params2.get("user") !? "") == "bob")
+    assert((params2.get("database") !? "") == "app")
+
+    // 3. Directory path resolves to <dir>/.s.PGSQL.<port> (libpq convention)
+    let pg_sock = fs.add(dir, ".s.PGSQL.5439")
+    let dir_srv = net.unix_server(pg_sock, true) ! { assert(false) return }
+    defer dir_srv.close() _
+
+    let task3 = co fn() Map[String] {
+        return pg_serve_one(dir_srv)
+    }()
+
+    let con3 = postgres.connect(dir, "carol", "", "dir_db", 5439) ! { println(E.message) assert(false) return }
+    assert(!con3.ssl_enabled())
+    assert(con3.server_version() == "16.4-unix")
+    con3.close()
+
+    let params3 = await task3
+    assert((params3.get("user") !? "") == "carol")
+    assert((params3.get("database") !? "") == "dir_db")
+
+    // 4. Forcing SSL over a Unix socket fails cleanly with .ssl
+    let req_ssl = false
+    postgres.connect(sock_path, "alice", "", "mydb", 5432, postgres.SslMode.require) ! {
+        req_ssl = error_is(E.code, ssl)
+    }
+    assert(req_ssl)
+
+    let verify_ssl = false
+    postgres.connect(sock_path, "alice", "", "mydb", 5432, postgres.SslMode.verify_full) ! {
+        verify_ssl = error_is(E.code, ssl)
+    }
+    assert(verify_ssl)
+
+    // 5. Missing socket fails cleanly with .connect
+    let missing = false
+    postgres.connect_unix(fs.add(dir, "does-not-exist.sock"), "alice", "", "mydb") ! {
+        missing = error_is(E.code, connect)
+    }
+    assert(missing)
+
+    #if OS == "linux"
+    // 6. Linux abstract socket (@name -> \0name)
+    let abstract_name = "valk-pg-abstract-" + core.process_id()
+    let asrv = net.unix_server("\0" + abstract_name) ! { assert(false) return }
+    defer asrv.close() _
+
+    let atask = co fn() Map[String] {
+        return pg_serve_one(asrv)
+    }()
+
+    let acon = postgres.connect("@" + abstract_name, "dave", "", "abs_db") ! { println(E.message) assert(false) return }
+    assert(!acon.ssl_enabled())
+    assert(acon.server_version() == "16.4-unix")
+    acon.close()
+
+    let aparams = await atask
+    assert((aparams.get("user") !? "") == "dave")
+    assert((aparams.get("database") !? "") == "abs_db")
+    #end
+}
+#end

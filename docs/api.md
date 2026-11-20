@@ -28,6 +28,8 @@ Namespaces: [main](#main)
 ```js
 // Opens a connection and logs in.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
+// Opens a connection over a Unix domain socket and logs in.
++ fn connect_unix(socket_path: String, user: String, password: String, db: ?String (null), port: u32 (5432)) Connection !Error
 // Same as `connect`, with SSL settings beyond the mode: the CA file that the server certificate must lead to, and a client certificate for a server that asks for one.
 + fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.

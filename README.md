@@ -2,7 +2,7 @@
 
 A package to query PostgreSQL databases. The package is purely written in Valk and has no os-package dependencies.
 
-Requires Valk 0.7.9 or newer.
+Requires Valk 0.8.10 or newer.
 
 API documentation: [docs/api.md](docs/api.md), [docs/api-full.md](docs/api-full.md).
 
@@ -67,6 +67,7 @@ Notes:
 - Server errors carry the SQLSTATE in `E.sqlstate`.
 - Single statement queries are prepared and cached.
 - SSL: pass `postgres.SslMode.disable`, `prefer` (default), `require` or `verify_full` as the last argument of `connect`. `connect_with` takes a `postgres.SslOptions` instead, which adds a CA file for the server certificate and a client certificate for servers that ask for one.
+- Unix domain sockets: pass a socket directory (such as `"/var/run/postgresql"`, which resolves to `.s.PGSQL.<port>`), a socket file path, or a Linux abstract socket starting with `@` as the `host` of `connect`, or call `postgres.connect_unix(socket_path, user, password, db)`. `SslMode.prefer` skips SSL over Unix sockets.
 
 ## Prepared statements
 

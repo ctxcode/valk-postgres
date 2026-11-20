@@ -1,4 +1,5 @@
 use valk.net
+use valk.fs
 use valk.time
 
 // Bytes asked from the socket per read
@@ -6,11 +7,25 @@ value RECV_CHUNK (65536)
 
 /// Opens a connection and logs in.
 ///
+/// `host` may be a host name, an IP address, or a Unix domain socket path starting with `/`
+/// (or `@` for a Linux abstract socket). When `host` is a directory, `.s.PGSQL.<port>` is
+/// appended following PostgreSQL conventions.
 /// `db` is the database to connect to, or null for the database named after the user.
-/// `ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`).
+/// `ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`);
+/// `prefer` skips SSL over Unix domain sockets.
 /// Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA-256.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error {
     return connect_with(host, user, password, db, port, SslOptions { mode: ssl }) !>
+}
+
+/// Opens a connection over a Unix domain socket and logs in.
+///
+/// `socket_path` may be the socket file itself (for example `/var/run/postgresql/.s.PGSQL.5432`),
+/// a directory containing `.s.PGSQL.<port>` (for example `/var/run/postgresql`), or a Linux
+/// abstract socket starting with `@`.
++ fn connect_unix(socket_path: String, user: String, password: String, db: ?String (null), port: u32 (5432)) Connection !Error {
+    let sock = dial_socket(socket_path, port, true) !>
+    return open_connection(sock, socket_path, user, password, db, SslOptions { mode: SslMode.disable }, true) !>
 }
 
 /// Same as `connect`, with SSL settings beyond the mode: the CA file that the server
@@ -24,8 +39,39 @@ value RECV_CHUNK (65536)
 /// }) ! panic("%{E.message}")
 /// ```
 + fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error {
-    let sock = net.tcp_client(host, port.to(u16)) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
+    let unix = is_unix_host(host)
+    if unix && (ssl.mode == SslMode.require || ssl.mode == SslMode.verify_full) {
+        throw .ssl { message: "SSL is not supported over a Unix domain socket" }
+    }
+    let sock = dial_socket(host, port, unix) !>
+    return open_connection(sock, host, user, password, db, ssl, unix) !>
+}
 
+fn is_unix_host(host: String) bool {
+    return host.starts_with("/") || host.starts_with("@") || (host.bytes > 0 && host[0] == 0)
+}
+
+fn is_directory(path: String) bool {
+    let info = fs.stat(path) ! return false
+    return info.kind == fs.FileKind.directory
+}
+
+fn resolve_unix_path(host: String, port: u32) String {
+    if host.starts_with("@") : return "\0" + host.range(1, host.bytes - 1)
+    if host.bytes > 0 && host[0] == 0 : return host
+    if is_directory(host) : return fs.add(host, ".s.PGSQL." + port)
+    return host
+}
+
+fn dial_socket(host: String, port: u32, unix: bool) net.TcpConnection !Error {
+    if unix {
+        let path = resolve_unix_path(host, port)
+        return net.unix_client(path) ! throw .connect { message: "Failed to connect to Unix socket '%{host}'" }
+    }
+    return net.tcp_client(host, port.to(u16)) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
+}
+
+fn open_connection(sock: net.TcpConnection, host: String, user: String, password: String, db: ?String, ssl: SslOptions, is_unix: bool) Connection !Error {
     let con = Connection {
         con: sock
         host: host
@@ -33,6 +79,7 @@ value RECV_CHUNK (65536)
         password: password
         db: db
         ssl: ssl
+        is_unix: is_unix
         reader: ByteReader.new("")
     }
     // A query may legitimately run for a long time; connecting had its own timeout
@@ -65,6 +112,7 @@ value RECV_CHUNK (65536)
     password: String
     db: ?String
     ssl: SslOptions
+    is_unix: bool (false)
     // Data in
     data_in: ByteBuffer (.new())
     read_offset: uint (0) // Start of the unread bytes in data_in; everything before was consumed
@@ -94,7 +142,7 @@ value RECV_CHUNK (65536)
     ~ closed: bool (false)
 
     fn init() !Error {
-        if this.ssl.mode != SslMode.disable : this.enable_ssl() !>
+        if !this.is_unix && this.ssl.mode != SslMode.disable : this.enable_ssl() !>
         this.send_startup() !>
         this.authenticate() !>
         // Collect the parameter status and key data messages until ReadyForQuery

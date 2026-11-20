@@ -50,6 +50,8 @@ The kinds of `Value`.
 ```js
 // Opens a connection and logs in.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
+// Opens a connection over a Unix domain socket and logs in.
++ fn connect_unix(socket_path: String, user: String, password: String, db: ?String (null), port: u32 (5432)) Connection !Error
 // Same as `connect`, with SSL settings beyond the mode: the CA file that the server certificate must lead to, and a client certificate for a server that asks for one.
 + fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.
@@ -62,9 +64,21 @@ The kinds of `Value`.
 
 Opens a connection and logs in.
 
+`host` may be a host name, an IP address, or a Unix domain socket path starting with `/`
+(or `@` for a Linux abstract socket). When `host` is a directory, `.s.PGSQL.<port>` is
+appended following PostgreSQL conventions.
 `db` is the database to connect to, or null for the database named after the user.
-`ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`).
+`ssl` decides whether the connection is upgraded to SSL before logging in (see `SslMode`);
+`prefer` skips SSL over Unix domain sockets.
 Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA-256.
+
+### connect_unix
+
+Opens a connection over a Unix domain socket and logs in.
+
+`socket_path` may be the socket file itself (for example `/var/run/postgresql/.s.PGSQL.5432`),
+a directory containing `.s.PGSQL.<port>` (for example `/var/run/postgresql`), or a Linux
+abstract socket starting with `@`.
 
 ### connect_with
 
