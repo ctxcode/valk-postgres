@@ -7,27 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package.
-+ error Error (connect, ssl, auth, unsupported, protocol, error, closed) payload { message: String, sqlstate: String (""), severity: String (""), detail: String (""), hint: String ("") }
-```
-
-### Error
-
-Thrown by every operation of this package.
-
-- `connect`: the TCP connection or the startup handshake failed.
-- `ssl`: SSL was required but could not be established.
-- `auth`: the server rejected the credentials.
-- `unsupported`: the server asked for something this package does not implement.
-- `protocol`: the server sent bytes this package did not expect.
-- `error`: the server reported an error for a query. `sqlstate` holds the SQLSTATE
-  (for example `42P01` for an unknown table), `message`, `detail` and `hint` the
-  text the server sent.
-- `closed`: the connection is closed.
-
 ## Enums for 'main'
 
 ```js
@@ -443,6 +422,42 @@ while true {
     if isset(job) : println("new job: " + job.payload)
 }
 ```
+
+```js
+// Thrown by every operation of this package.
++ union Error {
+    connect(String, String, String, String, String)
+    ssl(String)
+    auth(String, String, String, String, String)
+    unsupported(String)
+    protocol(String)
+    error(String, String, String, String, String)
+    closed(String)
+
+    + get detail: String
+    + get hint: String
+    + get message: String
+    + get severity: String
+    + get sqlstate: String
+    + fn to_string() String
+}
+```
+
+### Error
+
+Thrown by every operation of this package.
+
+- `connect(message, sqlstate, severity, detail, hint)`: the TCP or Unix socket connection
+  or the startup handshake failed.
+- `ssl(message)`: SSL was required but could not be established.
+- `auth(message, sqlstate, severity, detail, hint)`: the server rejected the credentials.
+- `unsupported(message)`: the server asked for something this package does not implement.
+- `protocol(message)`: the server sent bytes this package did not expect.
+- `error(message, sqlstate, severity, detail, hint)`: the server reported an error for a
+  query, or a query, bind, or copy error occurred. `sqlstate` holds the SQLSTATE (for
+  example `42P01` for an unknown table, or `""`), `message`, `severity`, `detail` and `hint`
+  the text the server sent.
+- `closed(message)`: the connection or statement is closed.
 
 ```js
 // A notification received through `LISTEN`.

@@ -31,7 +31,7 @@ extend Connection {
             if mechanism == "" : break
             if mechanism == "SCRAM-SHA-256" : has_scram = true
         }
-        if !has_scram : throw .unsupported { message: "The server offers no supported SASL mechanism (only SCRAM-SHA-256 is supported)" }
+        if !has_scram : throw .unsupported("The server offers no supported SASL mechanism (only SCRAM-SHA-256 is supported)")
 
         let sha256 = crypto.HashAlgorithm.sha256
 
@@ -51,7 +51,7 @@ extend Connection {
         this.recv() !>
         this.check_error(false) !>
         if this.msg_type != 'R' : this.unexpected() !>
-        if r.read_u32_be() != AUTH_SASL_CONTINUE : throw .protocol { message: "Expected a SASL continue message from the server" }
+        if r.read_u32_be() != AUTH_SASL_CONTINUE : throw .protocol("Expected a SASL continue message from the server")
         let server_first = r.read_remaining_string()
         let server_nonce = ""
         let salt_b64 = ""
@@ -61,12 +61,12 @@ extend Connection {
             else if part.starts_with("s=") : salt_b64 = part.range(2, part.length - 2)
             else if part.starts_with("i=") : iterations = part.range(2, part.length - 2).to_uint() !? 0
         }
-        if !server_nonce.starts_with(nonce) : throw .auth { message: "The SCRAM server nonce does not start with the client nonce" }
-        if salt_b64 == "" || iterations == 0 : throw .protocol { message: "Invalid SCRAM server first message" }
-        let salt = crypto.base64_decode(salt_b64) ! throw .protocol { message: "Invalid SCRAM salt" }
+        if !server_nonce.starts_with(nonce) : throw .auth("The SCRAM server nonce does not start with the client nonce", "", "", "", "")
+        if salt_b64 == "" || iterations == 0 : throw .protocol("Invalid SCRAM server first message")
+        let salt = crypto.base64_decode(salt_b64) ! throw .protocol("Invalid SCRAM salt")
 
         // Keys
-        let salted_password = crypto.pbkdf2(sha256, this.password, salt, iterations, 32) ! throw .auth { message: "Failed to derive the SCRAM password" }
+        let salted_password = crypto.pbkdf2(sha256, this.password, salt, iterations, 32) ! throw .auth("Failed to derive the SCRAM password", "", "", "", "")
         let client_key = crypto.Hmac.sign(sha256, salted_password, "Client Key")
         let stored_key = crypto.hash(sha256, client_key)
         let client_final_bare = "c=biws,r=" + server_nonce // biws = base64("n,,")
@@ -92,13 +92,13 @@ extend Connection {
         this.recv() !>
         this.check_error(false) !>
         if this.msg_type != 'R' : this.unexpected() !>
-        if r.read_u32_be() != AUTH_SASL_FINAL : throw .protocol { message: "Expected a SASL final message from the server" }
+        if r.read_u32_be() != AUTH_SASL_FINAL : throw .protocol("Expected a SASL final message from the server")
         let server_final = r.read_remaining_string()
-        if server_final.starts_with("e=") : throw .auth { message: "SCRAM authentication failed: " + server_final.range(2, server_final.length - 2) }
-        if !server_final.starts_with("v=") : throw .protocol { message: "Invalid SCRAM server final message" }
+        if server_final.starts_with("e=") : throw .auth("SCRAM authentication failed: " + server_final.range(2, server_final.length - 2), "", "", "", "")
+        if !server_final.starts_with("v=") : throw .protocol("Invalid SCRAM server final message")
         let server_key = crypto.Hmac.sign(sha256, salted_password, "Server Key")
         let server_signature = crypto.Hmac.sign(sha256, server_key, auth_message)
         let expected = "v=" + crypto.base64_encode(server_signature)
-        if !crypto.constant_time_equals(expected, server_final) : throw .auth { message: "The SCRAM server signature is invalid" }
+        if !crypto.constant_time_equals(expected, server_final) : throw .auth("The SCRAM server signature is invalid", "", "", "", "")
     }
 }

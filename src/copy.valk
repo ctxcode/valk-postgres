@@ -21,9 +21,9 @@ extend Connection {
         let buf = [u8]{ 0 x COPY_CHUNK }
         while true {
             let count = data.read(buf) ! {
-                if error_is(E.code, closed) : break
+                if E is .closed : break
                 this.abort_copy("Reading the data to copy failed") !>
-                throw .error { message: "Reading the data to copy failed" }
+                throw .error("Reading the data to copy failed", "", "", "", "")
             }
             if count == 0 : break
             this.sender.write(buf.view(0, count))
@@ -64,7 +64,7 @@ extend Connection {
                     // The server sends the rest anyway: read past it, so the connection stays usable
                     this.reset_query_state()
                     this.wait_ready() !>
-                    throw .error { message: "Writing the copied data failed" }
+                    throw .error("Writing the copied data failed", "", "", "", "")
                 }
                 continue
             }
@@ -112,7 +112,7 @@ extend Connection {
             if row.length != columns.length {
                 s.clear()
                 this.abort_copy("A row has the wrong number of values") !>
-                throw .error { message: "Row %{index} has %{row.length} values for %{columns.length} columns" }
+                throw .error("Row %{index} has %{row.length} values for %{columns.length} columns", "", "", "", "")
             }
             each row as value, i {
                 if i > 0 : s.write_byte('\t')
@@ -131,7 +131,7 @@ extend Connection {
     // Sends the statement and reads up to the answer that starts the copy: 'G' for data going
     // in, 'H' for data coming out
     fn start_copy(statement: String, expected: u8) !Error {
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed")
         if this.in_progress : this.stop_query()
         this.start_statement()
         if this.debug : println("Copy: " + statement)
@@ -144,12 +144,12 @@ extend Connection {
             let wanted = expected == 'G' ? "COPY ... FROM STDIN" : "COPY ... TO STDOUT"
             if t == 'G' {
                 this.abort_copy("The copy goes the other way") !>
-                throw .error { message: "This statement copies data in; it needs " + wanted }
+                throw .error("This statement copies data in; it needs " + wanted, "", "", "", "")
             }
             if t == 'H' || t == 'C' || t == 'T' || t == 'I' {
                 this.reset_query_state()
                 this.wait_ready() !>
-                throw .error { message: "The statement is not " + wanted }
+                throw .error("The statement is not " + wanted, "", "", "", "")
             }
             this.unexpected() !>
         }

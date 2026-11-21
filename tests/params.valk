@@ -52,7 +52,7 @@ test "Placeholders" {
     let failed = false
     con.query("SELECT :nope::int", .{ "other" => 1 }) ! {
         failed = true
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("nope"))
     }
     assert(failed)

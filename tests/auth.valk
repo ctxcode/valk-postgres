@@ -34,7 +34,7 @@ test "MD5 authentication" {
 
 fn wrong_password(port: u32) bool {
     let con = postgres.connect("127.0.0.1", "test", "wrong", "valk_postgres_tests", port) ! {
-        assert(error_is(E.code, auth))
+        assert(E is .auth)
         assert(E.sqlstate == "28P01")
         assert(E.message.length > 0)
         return true
@@ -50,7 +50,7 @@ test "Wrong password" {
 
 test "Unknown database" {
     let con = postgres.connect("127.0.0.1", "test", "root", "does_not_exist", 5432) ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
         assert(E.sqlstate == "3D000")
         return
     }
@@ -60,7 +60,7 @@ test "Unknown database" {
 
 test "Connection refused" {
     let con = postgres.connect("127.0.0.1", "test", "root", null, 1) ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
         return
     }
     con.close()

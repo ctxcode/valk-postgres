@@ -36,12 +36,12 @@ use valk.sync
 
     /// Takes over `con`, whose prepared statements stay usable through `query`.
     + static fn new(con: Connection) Pipeline !Error {
-        if con.closed : throw .closed { message: "The connection is closed" }
+        if con.closed : throw .closed("The connection is closed")
         if con.in_progress : con.stop_query()
         let pipeline = Pipeline {
             con: con
-            write_waker: sync.Waker.new() ! throw .error { message: "Failed to create a waker" }
-            read_waker: sync.Waker.new() ! throw .error { message: "Failed to create a waker" }
+            write_waker: sync.Waker.new() ! throw .error("Failed to create a waker", "", "", "", "")
+            read_waker: sync.Waker.new() ! throw .error("Failed to create a waker", "", "", "", "")
         }
         co pipeline.write_loop()
         co pipeline.read_loop()
@@ -60,8 +60,8 @@ use valk.sync
     /// Throws `error` with the SQLSTATE when the server rejects the query, and `closed` when
     /// the connection failed.
     + fn query(statement: Statement, values: ?Map[?Value] (null)) PipelineResult !Error {
-        if this.closed : throw .closed { message: "The pipeline is closed" + (this.failure.length > 0 ? ": " + this.failure : "") }
-        if statement.closed : throw .closed { message: "The statement is closed" }
+        if this.closed : throw .closed("The pipeline is closed" + (this.failure.length > 0 ? ": " + this.failure : ""))
+        if statement.closed : throw .closed("The statement is closed")
         let formats = this.result_formats(statement)
         this.encode(statement, values) !>
         return this.submit(statement, formats) !>
@@ -102,8 +102,8 @@ use valk.sync
             let detail = result.detail
             let hint = result.hint
             result.release()
-            if sqlstate.length == 0 : throw .closed { message: message }
-            throw .error { message: message, sqlstate: sqlstate, severity: severity, detail: detail, hint: hint }
+            if sqlstate.length == 0 : throw .closed(message)
+            throw .error(message, sqlstate, severity, detail, hint)
         }
         return result
     }
@@ -115,7 +115,7 @@ use valk.sync
             reused.reset(statement, formats)
             return reused
         }
-        let waker = sync.Waker.new() ! throw .error { message: "Failed to create a waker" }
+        let waker = sync.Waker.new() ! throw .error("Failed to create a waker", "", "", "", "")
         return PipelineResult { pipeline: this, statement: statement, formats: formats, waker: waker }
     }
 
@@ -139,11 +139,11 @@ use valk.sync
         each statement.names as name {
             let given = values ?! {
                 s.clear()
-                throw .error { message: "No value for the placeholder ':" + name + "'" }
+                throw .error("No value for the placeholder ':" + name + "'", "", "", "", "")
             }
             let value = given.get(name) ! {
                 s.clear()
-                throw .error { message: "No value for the placeholder ':" + name + "'" }
+                throw .error("No value for the placeholder ':" + name + "'", "", "", "", "")
             }
             con.write_param(s, value ?? Value.null())
         }
@@ -305,10 +305,10 @@ use valk.sync
         let statement = this.statement
         let count = this.count
         pipeline.idle_queries.append(this)
-        if pipeline.closed : throw .closed { message: "The pipeline is closed" + (pipeline.failure.length > 0 ? ": " + pipeline.failure : "") }
-        if statement.closed : throw .closed { message: "The statement is closed" }
+        if pipeline.closed : throw .closed("The pipeline is closed" + (pipeline.failure.length > 0 ? ": " + pipeline.failure : ""))
+        if statement.closed : throw .closed("The statement is closed")
         let expected = statement.names.length
-        if count != expected : throw .error { message: "The statement takes " + expected + " values, " + count + " given" }
+        if count != expected : throw .error("The statement takes " + expected + " values, " + count + " given", "", "", "", "")
         let formats = pipeline.result_formats(statement)
         let payload = this.payload
         payload.write_u16_be(formats.length.to(u16))

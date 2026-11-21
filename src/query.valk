@@ -59,7 +59,7 @@ extend Connection {
 
     // The state a new query starts from; the values of its `$1`, `$2`, ... go in `final_binds`
     fn begin_query() !Error {
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed")
         if this.in_progress : this.stop_query()
         this.in_progress = true
         this.query_serial++
@@ -312,7 +312,7 @@ extend Connection {
                 this.read_ready()
                 return false
             }
-            if t == 'D' : throw .protocol { message: "The server sent a row without a row description" }
+            if t == 'D' : throw .protocol("The server sent a row without a row description")
             this.unexpected() !>
         }
     }
@@ -410,11 +410,11 @@ extend Connection {
         let types = this.column_types
         let formats = this.column_formats
         let count: uint = r.read_u16_be()
-        if count != this.column_count : throw .protocol { message: "The server sent a row with an unexpected number of columns" }
+        if count != this.column_count : throw .protocol("The server sent a row with an unexpected number of columns")
         let i: uint = 0
         while i < count {
-            let name = names.get(i) ! throw .protocol { message: "Bug: Missing column name" }
-            let type = types.get(i) ! throw .protocol { message: "Bug: Missing column type" }
+            let name = names.get(i) ! throw .protocol("Bug: Missing column name")
+            let type = types.get(i) ! throw .protocol("Bug: Missing column type")
             let binary = (formats.get(i) !? FORMAT_TEXT) == FORMAT_BINARY
             i++
             let len = r.read_u32_be()

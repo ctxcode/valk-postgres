@@ -26,7 +26,7 @@ extend Connection {
     fn authenticate() !Error {
         let count = 0
         while true {
-            if count++ > 10 : throw .protocol { message: "The server keeps asking for authentication" }
+            if count++ > 10 : throw .protocol("The server keeps asking for authentication")
             this.recv() !>
             this.check_error(false) !>
             if this.msg_type != 'R' : this.unexpected() !>
@@ -46,7 +46,7 @@ extend Connection {
                 this.sasl_auth() !>
                 continue
             }
-            throw .unsupported { message: "Unsupported authentication method requested by the server (code %{code})" }
+            throw .unsupported("Unsupported authentication method requested by the server (code %{code})")
         }
     }
 }

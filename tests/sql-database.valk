@@ -64,11 +64,11 @@ test "Through the sql package" {
 
     // Errors arrive as sql errors, with the SQLSTATE kept
     db.exec("INSERT INTO sql_users (id, name) VALUES (1, 'clash')") ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
         assert(E.driver_code == "23505")
     }
     db.exec("SELECT * FROM nothing_here") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.driver_code.starts_with("42"))
     }
     // The connection keeps working after an error
@@ -134,7 +134,7 @@ test "Transactions and migrations on Postgres" {
         tx.exec("INSERT INTO sql_tx VALUES (3)") !>
         tx.exec("INSERT INTO nothing_here VALUES (4)") !>
     }) ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert((db.value("SELECT count(*) FROM sql_tx") ! { assert(false) return }).to_int() == 2)
     }
 
@@ -241,7 +241,7 @@ test "Chunking and rows taken over, on Postgres" {
     rows.next(row) ! { assert(false) return }
     db.exec("UPDATE sql_chunks SET checked = false WHERE id = 1") ! { assert(false) return }
     rows.next(row) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("another statement ran"))
         rows.close()
         db.exec("DROP TABLE sql_chunks") ! { assert(false) return }

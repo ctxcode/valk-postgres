@@ -55,7 +55,7 @@ test "COPY in and out" {
     con.copy_out("COPY copy_people FROM STDIN", FailingWriter {}) ! { wrong_way = E.message }
     assert(wrong_way == "This statement copies data in; it needs COPY ... TO STDOUT")
     let bad_data = false
-    con.copy_in("COPY copy_people (age) FROM STDIN", ByteReader.new("not a number\n")) ! { bad_data = error_is(E.code, error) }
+    con.copy_in("COPY copy_people (age) FROM STDIN", ByteReader.new("not a number\n")) ! { bad_data = E is .error }
     assert(bad_data)
     con.query("SELECT 1 AS one") ! { println(E.message) assert(false) return }
     let one = con.fetch_one() ! { assert(false) return }

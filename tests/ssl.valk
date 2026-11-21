@@ -2,7 +2,7 @@ use postgres
 
 fn ssl_fails(port: u32, mode: postgres.SslMode) bool {
     let con = connect(port, mode) ! {
-        return error_is(E.code, ssl)
+        return E is .ssl
     }
     con.close()
     return false
@@ -52,7 +52,7 @@ fn connect_mtls(options: postgres.SslOptions) postgres.Connection !postgres.Erro
     return con
 }
 fn mtls_fails(options: postgres.SslOptions) bool {
-    let con = connect_mtls(options) ! return error_is(E.code, ssl)
+    let con = connect_mtls(options) ! return E is .ssl
     con.close()
     return false
 }
@@ -66,7 +66,7 @@ fn client_dn(con: postgres.Connection) String {
 test "SSL client certificate" {
     // Without a certificate the server refuses the login
     let anonymous = connect_mtls(postgres.SslOptions { ca_file: test_cert("ca.crt") }) ! {
-        assert(error_is(E.code, auth))
+        assert(E is .auth)
         return
     }
     anonymous.close()

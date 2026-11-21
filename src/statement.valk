@@ -110,24 +110,24 @@ extend Connection {
         this.reset_query_state()
         if param_count != names.length {
             statement.close()
-            throw .error { message: "A prepared statement takes its values by name: use :name instead of $1 or ?" }
+            throw .error("A prepared statement takes its values by name: use :name instead of $1 or ?", "", "", "", "")
         }
         return statement
     }
 
     // Binds `values` to a prepared statement and runs it
     fn query_prepared(statement: Statement, values: ?Map[?Value]) !Error {
-        if statement.closed : throw .closed { message: "The statement is closed" }
+        if statement.closed : throw .closed("The statement is closed")
         this.begin_query() !>
         let binds = this.final_binds
         each statement.names as name {
             let given = values ?! {
                 this.reset_query_state()
-                throw .error { message: "No value for the placeholder ':" + name + "'" }
+                throw .error("No value for the placeholder ':" + name + "'", "", "", "", "")
             }
             let value = given.get(name) ! {
                 this.reset_query_state()
-                throw .error { message: "No value for the placeholder ':" + name + "'" }
+                throw .error("No value for the placeholder ':" + name + "'", "", "", "", "")
             }
             binds.append(value ?? Value.null())
         }

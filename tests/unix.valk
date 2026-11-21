@@ -132,20 +132,20 @@ test "Unix domain socket" {
     // 4. Forcing SSL over a Unix socket fails cleanly with .ssl
     let req_ssl = false
     postgres.connect(sock_path, "alice", "", "mydb", 5432, postgres.SslMode.require) ! {
-        req_ssl = error_is(E.code, ssl)
+        req_ssl = E is .ssl
     }
     assert(req_ssl)
 
     let verify_ssl = false
     postgres.connect(sock_path, "alice", "", "mydb", 5432, postgres.SslMode.verify_full) ! {
-        verify_ssl = error_is(E.code, ssl)
+        verify_ssl = E is .ssl
     }
     assert(verify_ssl)
 
     // 5. Missing socket fails cleanly with .connect
     let missing = false
     postgres.connect_unix(fs.add(dir, "does-not-exist.sock"), "alice", "", "mydb") ! {
-        missing = error_is(E.code, connect)
+        missing = E is .connect
     }
     assert(missing)
 

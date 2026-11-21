@@ -41,7 +41,7 @@ value RECV_CHUNK (65536)
 + fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error {
     let unix = is_unix_host(host)
     if unix && (ssl.mode == SslMode.require || ssl.mode == SslMode.verify_full) {
-        throw .ssl { message: "SSL is not supported over a Unix domain socket" }
+        throw .ssl("SSL is not supported over a Unix domain socket")
     }
     let sock = dial_socket(host, port, unix) !>
     return open_connection(sock, host, user, password, db, ssl, unix) !>
@@ -66,9 +66,9 @@ fn resolve_unix_path(host: String, port: u32) String {
 fn dial_socket(host: String, port: u32, unix: bool) net.TcpConnection !Error {
     if unix {
         let path = resolve_unix_path(host, port)
-        return net.unix_client(path) ! throw .connect { message: "Failed to connect to Unix socket '%{host}'" }
+        return net.unix_client(path) ! throw .connect("Failed to connect to Unix socket '%{host}'", "", "", "", "")
     }
-    return net.tcp_client(host, port.to(u16)) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
+    return net.tcp_client(host, port.to(u16)) ! throw .connect("Failed to connect to %{host}:%{port}", "", "", "", "")
 }
 
 fn open_connection(sock: net.TcpConnection, host: String, user: String, password: String, db: ?String, ssl: SslOptions, is_unix: bool) Connection !Error {
@@ -148,7 +148,7 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
         // Collect the parameter status and key data messages until ReadyForQuery
         let count = 0
         while true {
-            if count++ > 1000 : throw .protocol { message: "The server keeps sending startup messages" }
+            if count++ > 1000 : throw .protocol("The server keeps sending startup messages")
             this.recv() !>
             this.check_error(false) !>
             let t = this.msg_type
@@ -167,7 +167,7 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
     }
 
     fn unexpected() !Error $throw {
-        throw .protocol { message: "Unexpected message from the server: '" + this.msg_type.to_ascii_string() + "'" }
+        throw .protocol("Unexpected message from the server: '" + this.msg_type.to_ascii_string() + "'")
     }
 
     /// Returns the version string reported by the server (for example `16.4`).
@@ -216,15 +216,15 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
         if this.debug : println("ERROR %{code}: %{message}")
 
         if !wait_ready {
-            if code.starts_with("28") : throw .auth { message: message, sqlstate: code, severity: severity, detail: detail, hint: hint }
-            throw .connect { message: message, sqlstate: code, severity: severity, detail: detail, hint: hint }
+            if code.starts_with("28") : throw .auth(message, code, severity, detail, hint)
+            throw .connect(message, code, severity, detail, hint)
         }
 
         this.reset_query_state()
         // When the connection dies while waiting, the original error is the useful one
         this.wait_ready() _
 
-        throw .error { message: message, sqlstate: code, severity: severity, detail: detail, hint: hint }
+        throw .error(message, code, severity, detail, hint)
     }
 
     // Reads and discards messages until ReadyForQuery
@@ -262,7 +262,7 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
             r.source = buf.view(offset, 5)
             let type = r.read_byte()
             let len: uint = r.read_u32_be()
-            if len < 4 : throw .protocol { message: "Invalid message length received from the server" }
+            if len < 4 : throw .protocol("Invalid message length received from the server")
             let payload_len = len - 4
             while buf.length - offset < payload_len + 5 {
                 offset = this.recv_into_buffer() !>
@@ -325,8 +325,8 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
     /// ```
     + fn wait_notification(timeout_ms: uint (0)) ?Notification !Error {
         if this.notifications.length > 0 : return this.notifications.pop_first() !? null
-        if this.in_progress || this.fetching : throw .protocol { message: "Read the rows of the query before waiting for a notification" }
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.in_progress || this.fetching : throw .protocol("Read the rows of the query before waiting for a notification")
+        if this.closed : throw .closed("The connection is closed")
         let deadline = timeout_ms > 0 ? time.mono_ms() + timeout_ms : 0
         let saved_timeout = this.con.read_timeout_ms
         let got = this.wait_notification_until(deadline) ! {
@@ -356,14 +356,14 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
             }
             buf.reserve(RECV_CHUNK)
             let count = this.con.read(buf.view_spare(RECV_CHUNK)) ! {
-                if error_is(E.code, timeout) : return null
+                if E is .timeout : return null
                 this.closed = true
-                if error_is(E.code, closed) : throw .closed { message: "The server closed the connection" }
-                throw .error { message: "Failed to read bytes from the socket" }
+                if E is .closed : throw .closed("The server closed the connection")
+                throw .error("Failed to read bytes from the socket", "", "", "", "")
             }
             if count == 0 {
                 this.closed = true
-                throw .closed { message: "The server closed the connection" }
+                throw .closed("The server closed the connection")
             }
             buf.skip(count)
         }
@@ -381,7 +381,7 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
             r.source = buf.view(offset, 5)
             let type = r.read_byte()
             let len: uint = r.read_u32_be()
-            if len < 4 : throw .protocol { message: "Invalid message length received from the server" }
+            if len < 4 : throw .protocol("Invalid message length received from the server")
             if buf.length - offset < len + 1 : return
             r.reset()
             r.source = buf.view(offset + 5, len - 4)
@@ -417,8 +417,8 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
         buf.reserve(RECV_CHUNK)
         let spare = buf.view_spare(RECV_CHUNK)
         let count = this.con.read(spare) ! {
-            if error_is(E.code, closed) : throw .closed { message: "The server closed the connection" }
-            throw .error { message: "Failed to read bytes from the socket" }
+            if E is .closed : throw .closed("The server closed the connection")
+            throw .error("Failed to read bytes from the socket", "", "", "", "")
         }
         buf.skip(count)
         return 0
@@ -455,8 +455,8 @@ fn open_connection(sock: net.TcpConnection, host: String, user: String, password
         }
         this.con.write(pb) ! {
             pb.clear()
-            if error_is(E.code, closed) : throw .closed { message: "The connection is closed" }
-            throw .error { message: "Failed to send bytes to the server" }
+            if E is .closed : throw .closed("The connection is closed")
+            throw .error("Failed to send bytes to the server", "", "", "", "")
         }
         pb.clear()
         if this.debug {

@@ -82,7 +82,7 @@ test "Prepared statements" {
     insert.close()
     let closed = false
     insert.run(.{ "name" => "x", "age" => 1, "score" => 1, "active" => true }) ! {
-        closed = error_is(E.code, closed)
+        closed = E is .closed
     }
     assert(closed)
     insert.close()

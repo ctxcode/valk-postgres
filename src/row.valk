@@ -16,7 +16,7 @@ extend Connection {
         let lengths = this.col_lengths
         offsets.clear()
         let count: uint = r.read_u16_be()
-        if count != this.column_count : throw .protocol { message: "The server sent a row with an unexpected number of columns" }
+        if count != this.column_count : throw .protocol("The server sent a row with an unexpected number of columns")
         let i: uint = 0
         while i++ < count {
             let len = r.read_u32_be()

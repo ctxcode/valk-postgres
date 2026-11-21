@@ -47,11 +47,9 @@ class SqlDriver is sql.Driver {
     fn run_statement(statement: String, args: Array[sql.Value]) !sql.Error {
         let con = this.con
         con.clear_binds()
-        translate(statement, fn() !Error {
-            con.begin_query() !>
-            each args as arg : con.final_binds.append(to_driver_value(arg))
-            con.send_query(statement) !>
-        }) !>
+        con.begin_query() ! throw to_sql_error(E, statement)
+        each args as arg : con.final_binds.append(to_driver_value(arg))
+        con.send_query(statement) ! throw to_sql_error(E, statement)
     }
 
     /// Postgres has no counter of its own for the last insert; ask for the id with
@@ -61,22 +59,13 @@ class SqlDriver is sql.Driver {
     }
 
     + fn begin(immediate: bool) !sql.Error {
-        let con = this.con
-        translate("BEGIN", fn() !Error {
-            con.begin() !>
-        }) !>
+        this.con.begin() ! throw to_sql_error(E, "BEGIN")
     }
     + fn commit() !sql.Error {
-        let con = this.con
-        translate("COMMIT", fn() !Error {
-            con.commit() !>
-        }) !>
+        this.con.commit() ! throw to_sql_error(E, "COMMIT")
     }
     + fn rollback() !sql.Error {
-        let con = this.con
-        translate("ROLLBACK", fn() !Error {
-            con.rollback() !>
-        }) !>
+        this.con.rollback() ! throw to_sql_error(E, "ROLLBACK")
     }
 
     + fn ping() bool {
@@ -105,14 +94,14 @@ class SqlRows is sql.Rows {
     + fn next(row: Map[sql.Value]) bool !sql.Error {
         let con = this.con
         if con.query_serial != this.serial {
-            throw .error {
-                message: "These rows were dropped because another statement ran on the same connection. Read them to the end first, or walk the query with chunk_by_id, which leaves the connection free between pages."
-            }
+            throw .error(
+                "These rows were dropped because another statement ran on the same connection. Read them to the end first, or walk the query with chunk_by_id, which leaves the connection free between pages.",
+                "",
+                ""
+            )
         }
         let driver_row = this.driver_row
-        let found = translate_value[bool]("", fn() bool !Error {
-            return con.fetch_row(driver_row) !>
-        }) !>
+        let found = con.fetch_row(driver_row) ! throw to_sql_error(E, "")
         if !found : return false
         row.clear()
         each driver_row as value, column {
@@ -148,36 +137,26 @@ fn to_sql_value(value: Value) sql.Value {
     return sql.Value.of(value.to_string())
 }
 
-// An error type is not a value in valk, so a caught error cannot be handed to a function. Every
-// driver call therefore runs through here, which is the one place that maps the errors of this
-// package onto the errors of `sql`.
-fn translate_value[T](statement: String, work: fn()(T !Error)) T !sql.Error {
-    return work() ! {
-        if error_is(E.code, closed) : throw .closed { message: E.message, driver_code: E.sqlstate, sql: statement }
-        if error_is(E.code, connect) || error_is(E.code, ssl) || error_is(E.code, auth) || error_is(E.code, protocol) {
-            throw .connect { message: E.message, driver_code: E.sqlstate, sql: statement }
-        }
-        throw_for_sqlstate(E.sqlstate, E.message, statement)
-    }
-}
-
-fn translate(statement: String, work: fn()(!Error)) !sql.Error {
-    work() ! {
-        if error_is(E.code, closed) : throw .closed { message: E.message, driver_code: E.sqlstate, sql: statement }
-        if error_is(E.code, connect) || error_is(E.code, ssl) || error_is(E.code, auth) || error_is(E.code, protocol) {
-            throw .connect { message: E.message, driver_code: E.sqlstate, sql: statement }
-        }
-        throw_for_sqlstate(E.sqlstate, E.message, statement)
+// Maps an error of this package onto a `sql.Error`.
+fn to_sql_error(err: Error, statement: String) sql.Error {
+    return match err : sql.Error {
+        .closed(msg) => .closed(msg, "", statement)
+        .connect(msg, sqlstate, _, _, _) => .connect(msg, sqlstate, statement)
+        .ssl(msg) => .connect(msg, "", statement)
+        .auth(msg, sqlstate, _, _, _) => .connect(msg, sqlstate, statement)
+        .protocol(msg) => .connect(msg, "", statement)
+        .unsupported(msg) => .error(msg, "", statement)
+        .error(msg, sqlstate, _, _, _) => for_sqlstate(sqlstate, msg, statement)
     }
 }
 
 // The first two characters of a SQLSTATE say what kind of answer it is
-fn throw_for_sqlstate(sqlstate: String, message: String, statement: String) !sql.Error $throw {
+fn for_sqlstate(sqlstate: String, message: String, statement: String) sql.Error {
     let kind = sqlstate.range(0, 2)
-    if kind == "23" : throw .constraint { message: message, driver_code: sqlstate, sql: statement }
-    if kind == "42" || kind == "22" : throw .syntax { message: message, driver_code: sqlstate, sql: statement }
-    if kind == "40" || sqlstate == "55P03" : throw .busy { message: message, driver_code: sqlstate, sql: statement }
-    if sqlstate == "25006" : throw .readonly { message: message, driver_code: sqlstate, sql: statement }
-    if kind == "08" || kind == "57" : throw .connect { message: message, driver_code: sqlstate, sql: statement }
-    throw .error { message: message, driver_code: sqlstate, sql: statement }
+    if kind == "23" : return .constraint(message, sqlstate, statement)
+    if kind == "42" || kind == "22" : return .syntax(message, sqlstate, statement)
+    if kind == "40" || sqlstate == "55P03" : return .busy(message, sqlstate, statement)
+    if sqlstate == "25006" : return .readonly(message, sqlstate, statement)
+    if kind == "08" || kind == "57" : return .connect(message, sqlstate, statement)
+    return .error(message, sqlstate, statement)
 }

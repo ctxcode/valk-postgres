@@ -25,27 +25,27 @@ extend Connection {
         this.send() !>
         // The server answers with a single byte: 'S' (proceed) or 'N' (no SSL)
         let buf = this.recv_scratch.view(0, 1)
-        this.con.read(buf) ! throw .connect { message: "Failed to read the SSL response from the server" }
+        this.con.read(buf) ! throw .connect("Failed to read the SSL response from the server", "", "", "", "")
         let answer = buf[0]
         if answer == 'N' {
-            if this.ssl.mode == SslMode.require || this.ssl.mode == SslMode.verify_full : throw .ssl { message: "The server does not support SSL" }
+            if this.ssl.mode == SslMode.require || this.ssl.mode == SslMode.verify_full : throw .ssl("The server does not support SSL")
             return
         }
-        if answer != 'S' : throw .protocol { message: "Invalid SSL response from the server" }
+        if answer != 'S' : throw .protocol("Invalid SSL response from the server")
 
         let options = this.ssl
         let ssl = net.Ssl.new()
         ssl.set_verify(options.mode == SslMode.verify_full)
         let ca_file = options.ca_file
-        if isset(ca_file) : ssl.set_ca_cert(ca_file) ! throw .ssl { message: "Cannot read the CA file '" + ca_file + "'" }
+        if isset(ca_file) : ssl.set_ca_cert(ca_file) ! throw .ssl("Cannot read the CA file '" + ca_file + "'")
         let certificate = options.certificate_file
         if isset(certificate) {
             let key = options.private_key_file ?? certificate
             ssl.set_certificate(certificate, key, options.key_password) ! {
-                throw .ssl { message: "Cannot use the client certificate '" + certificate + "' with the key '" + key + "'" }
+                throw .ssl("Cannot use the client certificate '" + certificate + "' with the key '" + key + "'")
             }
         }
-        this.con.ssl_connect(ssl) ! throw .ssl { message: "Failed to establish SSL connection: " + ssl.get_error_message() }
+        this.con.ssl_connect(ssl) ! throw .ssl("Failed to establish SSL connection: " + ssl.get_error_message())
         this.ssl_active = true
     }
 }

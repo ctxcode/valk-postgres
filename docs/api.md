@@ -7,13 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package.
-+ error Error (connect, ssl, auth, unsupported, protocol, error, closed) payload { message: String, sqlstate: String (""), severity: String (""), detail: String (""), hint: String ("") }
-```
-
 ## Enums for 'main'
 
 ```js
@@ -130,6 +123,26 @@ Namespaces: [main](#main)
     + fn ssl_enabled() bool
     // Waits for a notification on a channel this connection listens to (`LISTEN name`) and returns the oldest one, or null when none arrives within `timeout_ms`; 0 waits forever.
     + fn wait_notification(timeout_ms: uint (0)) ?Notification !Error
+}
+```
+
+```js
+// Thrown by every operation of this package.
++ union Error {
+    connect(String, String, String, String, String)
+    ssl(String)
+    auth(String, String, String, String, String)
+    unsupported(String)
+    protocol(String)
+    error(String, String, String, String, String)
+    closed(String)
+
+    + get detail: String
+    + get hint: String
+    + get message: String
+    + get severity: String
+    + get sqlstate: String
+    + fn to_string() String
 }
 ```
 

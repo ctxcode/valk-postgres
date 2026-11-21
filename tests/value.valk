@@ -56,3 +56,24 @@ test "Value conversions" {
     assert(postgres.convert("\\x48656c6c6f").to_bytes() == "Hello")
     assert(postgres.convert("plain").to_bytes() == "plain")
 }
+
+test "Error fields and string conversion" {
+    let err: postgres.Error = .error("duplicate key value", "23505", "ERROR", "Key (id)=(1) already exists.", "Use ON CONFLICT")
+    assert(err is .error)
+    assert(err.message == "duplicate key value")
+    assert(err.sqlstate == "23505")
+    assert(err.severity == "ERROR")
+    assert(err.detail == "Key (id)=(1) already exists.")
+    assert(err.hint == "Use ON CONFLICT")
+    assert(err.to_string() == "duplicate key value")
+    assert("%{err}" == "duplicate key value")
+
+    let closed: postgres.Error = .closed("The connection is closed")
+    assert(closed is .closed)
+    assert(closed.message == "The connection is closed")
+    assert(closed.sqlstate == "")
+    assert(closed.severity == "")
+    assert(closed.detail == "")
+    assert(closed.hint == "")
+    assert("%{closed}" == "The connection is closed")
+}

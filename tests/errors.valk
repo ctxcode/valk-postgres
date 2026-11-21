@@ -12,7 +12,7 @@ test "Errors" {
     let failed = false
     con.query("SELEC 1") ! {
         failed = true
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.sqlstate == "42601")
         assert(E.message.length > 0)
         assert(E.severity == "ERROR")
@@ -101,7 +101,7 @@ test "Errors" {
     // A closed connection
     con.close()
     con.query("SELECT 1") ! {
-        assert(error_is(E.code, closed))
+        assert(E is .closed)
         return
     }
     assert(false)

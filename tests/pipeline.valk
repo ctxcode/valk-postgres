@@ -61,7 +61,7 @@ test "Pipeline: an error fails its own query only" {
     pipeline.close()
     assert(pipeline.closed)
     let after = false
-    pipeline.query(update, .{ "name" => "y", "id" => 1 }) ! { after = error_is(E.code, closed) }
+    pipeline.query(update, .{ "name" => "y", "id" => 1 }) ! { after = E is .closed }
     assert(after)
 }
 
@@ -106,7 +106,7 @@ test "Pipeline: start takes values in order without a map" {
 
     // A wrong number of values is an error, and the pipeline goes on
     let wrong = false
-    pipeline.start(insert).arg(8).run() ! { wrong = error_is(E.code, error) && E.message.contains("takes 5 values, 1 given") }
+    pipeline.start(insert).arg(8).run() ! { wrong = E is .error && E.message.contains("takes 5 values, 1 given") }
     assert(wrong)
     let after = pipeline.start(find).arg(7).run() ! { assert(false) return }
     assert(after.next_row())
