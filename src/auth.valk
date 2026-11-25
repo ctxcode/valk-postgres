@@ -66,12 +66,12 @@ extend Connection {
         let salt = crypto.base64_decode(salt_b64) ! throw .protocol("Invalid SCRAM salt")
 
         // Keys
-        let salted_password = crypto.pbkdf2(sha256, this.password, salt, iterations, 32) ! throw .auth("Failed to derive the SCRAM password", "", "", "", "")
-        let client_key = crypto.Hmac.sign(sha256, salted_password, "Client Key")
-        let stored_key = crypto.hash(sha256, client_key)
+        let salted_password = crypto.pbkdf2(this.password, sha256, salt, iterations, 32) ! throw .auth("Failed to derive the SCRAM password", "", "", "", "")
+        let client_key = crypto.Hmac.sign("Client Key", sha256, salted_password)
+        let stored_key = crypto.hash(client_key, sha256)
         let client_final_bare = "c=biws,r=" + server_nonce // biws = base64("n,,")
         let auth_message = client_first_bare + "," + server_first + "," + client_final_bare
-        let client_signature = crypto.Hmac.sign(sha256, stored_key, auth_message)
+        let client_signature = crypto.Hmac.sign(auth_message, sha256, stored_key)
         let proof = this.querybuf
         proof.clear()
         let i: uint = 0
@@ -96,8 +96,8 @@ extend Connection {
         let server_final = r.read_remaining_string()
         if server_final.starts_with("e=") : throw .auth("SCRAM authentication failed: " + server_final.range(2, server_final.length - 2), "", "", "", "")
         if !server_final.starts_with("v=") : throw .protocol("Invalid SCRAM server final message")
-        let server_key = crypto.Hmac.sign(sha256, salted_password, "Server Key")
-        let server_signature = crypto.Hmac.sign(sha256, server_key, auth_message)
+        let server_key = crypto.Hmac.sign("Server Key", sha256, salted_password)
+        let server_signature = crypto.Hmac.sign(auth_message, sha256, server_key)
         let expected = "v=" + crypto.base64_encode(server_signature)
         if !crypto.constant_time_equals(expected, server_final) : throw .auth("The SCRAM server signature is invalid", "", "", "", "")
     }
