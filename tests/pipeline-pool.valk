@@ -1,0 +1,41 @@
+use postgres
+
+test "PipelinePool: offline behavior, prepare handles, backoff, and connect_url errors" {
+    // Empty URL fails cleanly
+    let empty_err = false
+    postgres.connect_url("") ! { empty_err = E is .connect }
+    assert(empty_err)
+
+    // Unreachable port via connect_url fails cleanly
+    let conn_err = false
+    postgres.connect_url("postgres://bench:secret@127.0.0.1:1/benchmark?sslmode=disable") ! {
+        conn_err = E is .connect
+    }
+    assert(conn_err)
+
+    // Lazy PipelinePool records prepared statement indices and enforces retry backoff
+    let attempts = Array[uint]{ 0 }
+    let pool = postgres.PipelinePool.new(fn() postgres.Connection !postgres.Error {
+        attempts[0] = attempts[0] + 1
+        throw .connect("db offline", "", "", "", "")
+    }, 4, 200)
+    let s0 = pool.prepare("SELECT 1")
+    let s1 = pool.prepare("SELECT 2")
+    assert(s0 == 0 && s1 == 1)
+    assert(pool.length == 0)
+
+    let failed1 = false
+    pool.start(s0) ! { failed1 = E is .connect }
+    assert(failed1 && attempts[0] == 1)
+
+    // Second immediate call hits retry backoff without calling open again
+    let failed2 = false
+    pool.pick() ! { failed2 = E is .connect }
+    assert(failed2 && attempts[0] == 1)
+
+    // Closed pool returns closed error
+    pool.close()
+    let failed3 = false
+    pool.pick() ! { failed3 = E is .closed }
+    assert(failed3)
+}

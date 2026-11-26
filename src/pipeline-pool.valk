@@ -1,0 +1,169 @@
+use valk.core
+use valk.time
+
+/// One pipelined connection inside a `PipelinePool`, together with its prepared statements.
++ class PipelineSlot {
+    /// The underlying pipelined connection.
+    + pipe: Pipeline
+    /// Prepared statements registered through `PipelinePool.prepare`, indexed by handle.
+    + statements: Array[Statement] (.{})
+
+    /// Starts the prepared statement at `statement_index` on this slot's pipeline.
+    + fn start(statement_index: uint) PipelineQuery !Error {
+        let stmt = this.statements.get(statement_index) ! throw .closed("Unknown prepared statement index")
+        return this.pipe.start(stmt)
+    }
+
+    /// Closes this slot's pipeline and underlying connection.
+    + fn close() {
+        this.pipe.close()
+    }
+}
+
+/// A thread-local pool of pipelined PostgreSQL connections with shared prepared statements.
+///
+/// Connections are opened lazily on the first `pick()` or `start()` call, so a `PipelinePool`
+/// can live directly in a per-thread `global` on multi-worker HTTP servers. Queries are routed
+/// to the least-loaded open pipeline (round-robin tie-breaking).
+///
+/// ```valk
+/// global pool: postgres.PipelinePool (create_pool())
+///
+/// fn create_pool() postgres.PipelinePool {
+///     let p = postgres.PipelinePool.new(fn() postgres.Connection !postgres.Error {
+///         return postgres.connect_url(dsn, postgres.SslMode.disable) !>
+///     }, 8)
+///     p.prepare("SELECT id, name FROM items WHERE id = :id")
+///     return p
+/// }
+/// ```
++ class PipelinePool {
+    /// Maximum number of pipelined connections to open in this pool.
+    + size: uint
+    /// Minimum delay in milliseconds before retrying after all connection attempts fail.
+    + retry_delay_ms: uint (500)
+
+    open: fn()(Connection !Error)
+    sql_list: Array[String] (.{})
+    slots: Array[PipelineSlot] (.{})
+    next: uint (0)
+    init_lock: ?core.Mutex (null)
+    retry_at: uint (0)
+    closed: bool (false)
+
+    /// Creates a lazy pool of up to `size` pipelined connections opened via `open`.
+    + static fn new(open: fn()(Connection !Error), size: uint (4), retry_delay_ms: uint (500)) PipelinePool {
+        return PipelinePool {
+            open: open
+            size: size < 1 ? 1 : size
+            retry_delay_ms: retry_delay_ms
+        }
+    }
+
+    /// Registers `sql` to be prepared on every connection opened by this pool, returning its
+    /// statement handle index for `start(index)`. Call before the first `pick()` / `start()`.
+    + fn prepare(sql: String) uint {
+        let idx = this.sql_list.length
+        this.sql_list.append(sql)
+        return idx
+    }
+
+    /// Number of currently open connections in this pool.
+    + get length: uint {
+        return this.slots.length
+    }
+
+    /// Picks the least-loaded open `PipelineSlot`, opening connections lazily on first use.
+    + fn pick() PipelineSlot !Error {
+        if this.closed : throw .closed("The pipeline pool is closed")
+        if this.slots.length == 0 {
+            this.ensure_open() !>
+        }
+        let len = this.slots.length
+        if len == 0 : throw .connect("No database connections available", "", "", "", "")
+
+        let start = this.next % len
+        this.next = start + 1
+        let best = this.slots[start]
+        if !best.pipe.closed && best.pipe.waiting() == 0 : return best
+        let best_wait = best.pipe.closed ? uint.$max : best.pipe.waiting()
+        each 1 .. len as offset {
+            let candidate = this.slots[(start + offset) % len]
+            if candidate.pipe.closed : continue
+            let w = candidate.pipe.waiting()
+            if w < best_wait {
+                best = candidate
+                best_wait = w
+                if w == 0 : break
+            }
+        }
+        if best.pipe.closed : throw .closed("All pipeline connections are closed")
+        return best
+    }
+
+    /// Picks the least-loaded open slot and starts the prepared statement registered at `statement_index`.
+    + fn start(statement_index: uint) PipelineQuery !Error {
+        let slot = this.pick() !>
+        return slot.start(statement_index) !>
+    }
+
+    /// Closes all open pipelines in this pool.
+    + fn close() {
+        this.closed = true
+        each this.slots as slot {
+            slot.close()
+        }
+        this.slots.clear()
+    }
+
+    fn ensure_open() !Error {
+        let now = time.mono_ms()
+        if this.retry_at > now {
+            throw .connect("Database connection retry backoff active", "", "", "", "")
+        }
+
+        let guard = this.init_lock ?? (core.Mutex.new() ! throw .error("Failed to create pool lock", "", "", "", ""))
+        this.init_lock = guard
+        guard.lock()
+        defer guard.unlock()
+
+        if this.closed : throw .closed("The pipeline pool is closed")
+        if this.slots.length > 0 : return
+        if this.retry_at > time.mono_ms() {
+            throw .connect("Database connection retry backoff active", "", "", "", "")
+        }
+
+        let last_err: ?Error = null
+        each 0 .. this.size as _ {
+            let slot = this.open_slot() ! {
+                last_err = E
+                break
+            }
+            this.slots.append(slot)
+        }
+
+        if this.slots.length == 0 {
+            if this.retry_delay_ms > 0 : this.retry_at = time.mono_ms() + this.retry_delay_ms
+            let err = last_err
+            if isset(err) : throw err
+            throw .connect("Failed to open any pipeline connections", "", "", "", "")
+        }
+    }
+
+    fn open_slot() PipelineSlot !Error {
+        let con = this.open() !>
+        let stmts = Array[Statement].new(this.sql_list.length)
+        each this.sql_list as sql {
+            let stmt = con.prepare(sql) ! {
+                con.close()
+                throw E
+            }
+            stmts.append(stmt)
+        }
+        let pipe = Pipeline.new(con) ! {
+            con.close()
+            throw E
+        }
+        return PipelineSlot { pipe: pipe, statements: stmts }
+    }
+}

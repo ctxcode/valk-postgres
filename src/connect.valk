@@ -1,6 +1,7 @@
 use valk.net
 use valk.fs
 use valk.time
+use valk.url
 
 // Bytes asked from the socket per read
 value RECV_CHUNK (65536)
@@ -16,6 +17,33 @@ value RECV_CHUNK (65536)
 /// Supported authentication methods: trust, password (cleartext), md5 and SCRAM-SHA-256.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error {
     return connect_with(host, user, password, db, port, SslOptions { mode: ssl }) !>
+}
+
+/// Opens a connection from a PostgreSQL URL such as `postgres://user:pass@host:5432/dbname?sslmode=disable`.
+///
+/// Supports `postgres://` and `postgresql://` schemes, percent-encoded credentials,
+/// optional port (default 5432), optional database path, and `sslmode` (`disable`,
+/// `prefer`, `require`, `verify-full`).
++ fn connect_url(dsn: String, default_ssl: SslMode (SslMode.prefer)) Connection !Error {
+    if dsn.bytes == 0 : throw .connect("Empty PostgreSQL URL", "", "", "", "")
+    let parsed = url.parse(dsn)
+    let host = parsed.host.bytes > 0 ? parsed.host : "127.0.0.1"
+    if host == "localhost" : host = "127.0.0.1"
+    let port = (parsed.port ?? 5432).to(u32)
+    let user = parsed.user.bytes > 0 ? url.decode(parsed.user) : "postgres"
+    let password = parsed.password.bytes > 0 ? url.decode(parsed.password) : ""
+    let db_name = parsed.path.ltrim("/")
+    let db: ?String = db_name.bytes > 0 ? db_name : null
+    let ssl = default_ssl
+    if parsed.query.bytes > 0 {
+        let params = url.parse_query(parsed.query)
+        let mode = (params.get("sslmode") !? "").lower()
+        if mode == "disable" : ssl = SslMode.disable
+        else if mode == "prefer" : ssl = SslMode.prefer
+        else if mode == "require" : ssl = SslMode.require
+        else if mode == "verify-full" || mode == "verify_full" : ssl = SslMode.verify_full
+    }
+    return connect(host, user, password, db, port, ssl) !>
 }
 
 /// Opens a connection over a Unix domain socket and logs in.

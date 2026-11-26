@@ -31,6 +31,8 @@ The kinds of `Value`.
 + fn connect(host: String, user: String, password: String, db: ?String, port: u32 (5432), ssl: SslMode (SslMode.prefer)) Connection !Error
 // Opens a connection over a Unix domain socket and logs in.
 + fn connect_unix(socket_path: String, user: String, password: String, db: ?String (null), port: u32 (5432)) Connection !Error
+// Opens a connection from a PostgreSQL URL such as `postgres://user:pass@host:5432/dbname?sslmode=disable`.
++ fn connect_url(dsn: String, default_ssl: SslMode (SslMode.prefer)) Connection !Error
 // Same as `connect`, with SSL settings beyond the mode: the CA file that the server certificate must lead to, and a client certificate for a server that asks for one.
 + fn connect_with(host: String, user: String, password: String, db: ?String, port: u32, ssl: SslOptions) Connection !Error
 // Converts any supported value (integers, floats, bools, strings, json values, arrays of those, and nullable versions) into a `Value`.
@@ -58,6 +60,14 @@ Opens a connection over a Unix domain socket and logs in.
 `socket_path` may be the socket file itself (for example `/var/run/postgresql/.s.PGSQL.5432`),
 a directory containing `.s.PGSQL.<port>` (for example `/var/run/postgresql`), or a Linux
 abstract socket starting with `@`.
+
+### connect_url
+
+Opens a connection from a PostgreSQL URL such as `postgres://user:pass@host:5432/dbname?sslmode=disable`.
+
+Supports `postgres://` and `postgresql://` schemes, percent-encoded credentials,
+optional port (default 5432), optional database path, and `sslmode` (`disable`,
+`prefer`, `require`, `verify-full`).
 
 ### connect_with
 
@@ -566,6 +576,82 @@ it in the same expression; a started query that is never run is dropped.
 The number of queries that were sent or queued and have no result yet.
 
 ```js
+// A thread-local pool of pipelined PostgreSQL connections with shared prepared statements.
++ class PipelinePool {
+    // Minimum delay in milliseconds before retrying after all connection attempts fail.
+    + retry_delay_ms: uint
+    // Maximum number of pipelined connections to open in this pool.
+    + size: uint
+
+    // Closes all open pipelines in this pool.
+    + fn close() void
+    // Number of currently open connections in this pool.
+    + get length: uint
+    // Creates a lazy pool of up to `size` pipelined connections opened via `open`.
+    + static fn new(open: fn()(Connection !Error), size: uint (4), retry_delay_ms: uint (500)) PipelinePool
+    // Picks the least-loaded open `PipelineSlot`, opening connections lazily on first use.
+    + fn pick() PipelineSlot !Error
+    // Registers `sql` to be prepared on every connection opened by this pool, returning its statement handle index for `start(index)`. Call before the first `pick()` / `start()`.
+    + fn prepare(sql: String) uint
+    // Picks the least-loaded open slot and starts the prepared statement registered at `statement_index`.
+    + fn start(statement_index: uint) PipelineQuery !Error
+}
+```
+
+### PipelinePool
+
+A thread-local pool of pipelined PostgreSQL connections with shared prepared statements.
+
+Connections are opened lazily on the first `pick()` or `start()` call, so a `PipelinePool`
+can live directly in a per-thread `global` on multi-worker HTTP servers. Queries are routed
+to the least-loaded open pipeline (round-robin tie-breaking).
+
+```valk
+global pool: postgres.PipelinePool (create_pool())
+
+fn create_pool() postgres.PipelinePool {
+    let p = postgres.PipelinePool.new(fn() postgres.Connection !postgres.Error {
+        return postgres.connect_url(dsn, postgres.SslMode.disable) !>
+    }, 8)
+    p.prepare("SELECT id, name FROM items WHERE id = :id")
+    return p
+}
+```
+
+#### retry_delay_ms
+
+Minimum delay in milliseconds before retrying after all connection attempts fail.
+
+#### size
+
+Maximum number of pipelined connections to open in this pool.
+
+#### close
+
+Closes all open pipelines in this pool.
+
+#### length
+
+Number of currently open connections in this pool.
+
+#### new
+
+Creates a lazy pool of up to `size` pipelined connections opened via `open`.
+
+#### pick
+
+Picks the least-loaded open `PipelineSlot`, opening connections lazily on first use.
+
+#### prepare
+
+Registers `sql` to be prepared on every connection opened by this pool, returning its
+statement handle index for `start(index)`. Call before the first `pick()` / `start()`.
+
+#### start
+
+Picks the least-loaded open slot and starts the prepared statement registered at `statement_index`.
+
+```js
 // A query of a prepared statement being built with `Pipeline.start`: add its values with `arg`, in the order of the placeholders, then send it with `run`.
 + class PipelineQuery {
     // Adds the value of the next placeholder: an integer, float, bool, `String`, null for a nullable type, or anything `postgres.convert` takes. Returns the query, for chaining.
@@ -678,6 +764,41 @@ Moves to the next row; false after the last one. Its columns are read with `col_
 Gives the result back to its pipeline, which reuses it and its buffers for a later
 query. Optional: a result that is never released is freed like any other object. The
 result and every view of its columns must not be used afterwards.
+
+```js
+// One pipelined connection inside a `PipelinePool`, together with its prepared statements.
++ class PipelineSlot {
+    // The underlying pipelined connection.
+    + pipe: Pipeline
+    // Prepared statements registered through `PipelinePool.prepare`, indexed by handle.
+    + statements: Array[Statement]
+
+    // Closes this slot's pipeline and underlying connection.
+    + fn close() void
+    // Starts the prepared statement at `statement_index` on this slot's pipeline.
+    + fn start(statement_index: uint) PipelineQuery !Error
+}
+```
+
+### PipelineSlot
+
+One pipelined connection inside a `PipelinePool`, together with its prepared statements.
+
+#### pipe
+
+The underlying pipelined connection.
+
+#### statements
+
+Prepared statements registered through `PipelinePool.prepare`, indexed by handle.
+
+#### close
+
+Closes this slot's pipeline and underlying connection.
+
+#### start
+
+Starts the prepared statement at `statement_index` on this slot's pipeline.
 
 ```js
 // SSL settings for `connect_with`.
