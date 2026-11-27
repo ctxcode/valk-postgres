@@ -9,7 +9,7 @@ API documentation: [docs/api.md](docs/api.md), [docs/api-full.md](docs/api-full.
 ## Install
 
 ```
-vman install github.com/ctxcode/valk-postgres
+vman install github.com/zikue/valk-postgres
 ```
 
 ## Example
@@ -157,7 +157,7 @@ called off and none of its rows are kept.
 ## With valk-sql
 
 `postgres.database(con)` turns a connection into a `sql.Db` of the
-[valk-sql](https://github.com/ctxcode/valk-sql) package, which gives every database the same
+[valk-sql](https://github.com/zikue/valk-sql) package, which gives every database the same
 API: a query builder, migrations, connection pools, and rows read into your own classes. The
 same program then runs on another database by opening it with that driver instead.
 
